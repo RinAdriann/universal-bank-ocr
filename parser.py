@@ -16,15 +16,20 @@ import numpy as np
 import pandas as pd
 
 
+# Broadened header words to include Mandiri, BNI, BRI, BSI, etc.
 HEADER_WORDS = {
     "tanggal", "tgl", "date", "waktu", "time", "uraian", "keterangan",
     "deskripsi", "description", "transaksi", "mutasi", "debit", "debet",
     "kredit", "credit", "saldo", "balance", "nominal", "jumlah", "amount",
-    "penarikan", "withdrawal", "setoran", "deposit",
+    "penarikan", "withdrawal", "setoran", "deposit", "cabang", "branch",
+    "sandi", "referensi", "ref", "chq", "teller", "kurs", "valuta", "bukti"
 }
+
+# Improved DATE_RE: Replaced strict \b with lookarounds (?<!\d) and (?!\d) to catch 
+# dates mashed with strings by OCR (e.g., "12/04/23TRANSFER").
 DATE_RE = re.compile(
-    r"\b(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?:[./-](?P<year>\d{2,4}))?\b"
-    r"|\b(?P<day_name>\d{1,2})\s+(?P<month_name>[A-Za-z]+)(?:\s+(?P<year_name>\d{2,4}))?\b",
+    r"(?<!\d)(?P<day>\d{1,2})[-./](?P<month>\d{1,2})(?:[-./](?P<year>\d{2,4}))?(?!\d)"
+    r"|(?<!\d)(?P<day_name>\d{1,2})[-\s./]+(?P<month_name>[A-Za-z]{3,9})(?:[-\s./]+(?P<year_name>\d{2,4}))?(?!\d)",
     re.IGNORECASE,
 )
 
@@ -86,33 +91,42 @@ def _looks_like_date(value: str) -> bool:
 
 
 def normalize_date(value: str) -> str | None:
-    """Keep the detected date text without interpreting it as a timestamp."""
     match = DATE_RE.search(value.strip())
     return _clean_text(match.group(0)) if match else None
 
 
 def _excel_date_value(value: str) -> datetime | str:
-    """Create an explicit day-first Excel date; keep unrecognized text unchanged."""
     match = DATE_RE.fullmatch(value.strip())
     if not match:
         return value
     try:
         if match.group("day_name"):
+            # Added more Indonesian month variations (e.g. Pebruari, Nopember)
             month_names = {
-                "jan": 1, "januari": 1, "feb": 2, "februari": 2,
-                "mar": 3, "maret": 3, "apr": 4, "april": 4,
-                "mei": 5, "jun": 6, "juni": 6, "jul": 7, "juli": 7,
-                "agu": 8, "agt": 8, "agustus": 8, "sep": 9,
-                "sept": 9, "september": 9, "okt": 10, "oktober": 10,
-                "nov": 11, "november": 11, "des": 12, "desember": 12,
+                "jan": 1, "januari": 1, 
+                "feb": 2, "februari": 2, "pebruari": 2,
+                "mar": 3, "maret": 3, 
+                "apr": 4, "april": 4,
+                "mei": 5, "may": 5, 
+                "jun": 6, "juni": 6, 
+                "jul": 7, "juli": 7,
+                "agu": 8, "agt": 8, "agustus": 8, "aug": 8, "august": 8,
+                "sep": 9, "sept": 9, "september": 9, 
+                "okt": 10, "oktober": 10, "oct": 10, "october": 10,
+                "nov": 11, "november": 11, "nop": 11, "nopember": 11,
+                "des": 12, "desember": 12, "dec": 12, "december": 12,
             }
             day = int(match.group("day_name"))
-            month = month_names[match.group("month_name").lower()]
+            m_name = match.group("month_name").lower()
+            month = month_names.get(m_name)
+            if not month:
+                return value
             year_text = match.group("year_name")
         else:
             day = int(match.group("day"))
             month = int(match.group("month"))
             year_text = match.group("year")
+            
         year = int(year_text) if year_text else 1900
         if year < 100:
             year += 2000
@@ -122,19 +136,23 @@ def _excel_date_value(value: str) -> datetime | str:
 
 
 def normalize_amount(value: str) -> float | None:
-    """Parse common Indonesian and OCR-corrupted currency formats."""
     text = _clean_text(value).upper()
     if not text or _looks_like_date(text):
         return None
+        
+    # Expand markers to catch D, C, K (Kredit), IDR
     negative = text.startswith("-") or ("(" in text and ")" in text)
-    negative = negative or bool(re.search(r"\b(DB|DEBIT|DR)\b", text))
-    amount_text = re.sub(r"\b(RP|IDR|DB|CR|DEBIT|CREDIT|DR)\b", "", text)
+    negative = negative or bool(re.search(r"\b(DB|DEBIT|DEBET|DR|D)\b", text))
+    amount_text = re.sub(r"\b(RP|IDR|DB|CR|DEBIT|DEBET|CREDIT|KREDIT|DR|D|C|K)\b", "", text)
+    
     if re.search(r"[A-Z]", amount_text):
         return None
+        
     text = amount_text
     text = re.sub(r"[^0-9,.\-]", "", text).replace("-", "")
     if not text or not re.search(r"\d", text):
         return None
+        
     if "," in text and "." in text:
         decimal_separator = "," if text.rfind(",") > text.rfind(".") else "."
         thousands_separator = "." if decimal_separator == "," else ","
@@ -147,6 +165,7 @@ def normalize_amount(value: str) -> float | None:
     elif "." in text:
         left, right = text.split(".", 1)
         text = left + right if len(right) == 3 else text
+        
     try:
         number = float(text)
         return -number if negative else number
@@ -178,10 +197,7 @@ def _rapidocr_engine() -> Any:
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:
-        raise RuntimeError(
-            "Install dependencies with "
-            "`pip install -r requirements.txt`."
-        ) from exc
+        raise RuntimeError("Install dependencies with `pip install -r requirements.txt`.") from exc
     return RapidOCR()
 
 
@@ -223,7 +239,6 @@ def _preprocess(image: np.ndarray) -> np.ndarray:
 
 
 def _digital_page_is_usable(words: Sequence[Word]) -> bool:
-    """Use the text layer only when it contains enough statement-like content."""
     if len(words) < 8:
         return False
     date_count = sum(_looks_like_date(word.text) for word in words)
@@ -325,39 +340,65 @@ def _classify_cells(cells: Sequence[Cell]) -> dict[str, Any]:
     embedded = _embedded_amounts(description)
     if embedded:
         description = _remove_embedded_amounts(description)
+        
     result: dict[str, Any] = {
         "date": normalize_date(date_cell.text) if date_cell else None,
         "description": description,
         "numbers": numeric,
     }
-    if numeric or embedded:
-        if numeric:
-            result["balance"] = numeric[-1][1] if (len(numeric) >= 2 or embedded) else None
-        mutation_value = embedded[-1][1] if embedded else (
-            numeric[-2][1] if len(numeric) >= 2 else numeric[0][1]
-        )
-        mutation_text = (
-            embedded[-1][0]
-            if embedded
-            else numeric[-2][0].text if len(numeric) >= 2 else numeric[0][0].text
-        ).upper()
-        semantic_text = f"{mutation_text} {description.upper()}"
-        amount = abs(mutation_value)
-        is_debit = bool(re.search(r"\b(DB|DEBIT|DEBET|DR)\b", semantic_text))
-        is_credit = bool(re.search(r"\b(CR|CREDIT|KREDIT)\b", semantic_text))
-        if is_debit:
-            result["debit"], result["credit"] = amount, 0.0
-        elif is_credit or amount > 0:
-            result["debit"], result["credit"] = 0.0, amount
+    
+    balance_val = None
+    amount_val = None
+    is_debit = False
+    is_credit = False
+
+    # Logic for banks (like BNI/Mandiri) that use 3 numeric columns: [Debit, Credit, Balance]
+    if not embedded and len(numeric) >= 3:
+        balance_val = numeric[-1][1]
+        val1, val2 = numeric[-3][1], numeric[-2][1]
+        if val1 > 0 and val2 == 0:
+            is_debit, amount_val = True, val1
+        elif val2 > 0 and val1 == 0:
+            is_credit, amount_val = True, val2
         else:
-            result["debit"], result["credit"] = 0.0, 0.0
-        result["amount"] = amount
+            amount_val = val1 or val2
+
+    # Logic for embedded/BCA style or ambiguous 2 column [Amount, Balance]
+    if amount_val is None:
+        if numeric or embedded:
+            if numeric:
+                balance_val = numeric[-1][1] if (len(numeric) >= 2 or embedded) else None
+            
+            mutation_value = embedded[-1][1] if embedded else (
+                numeric[-2][1] if len(numeric) >= 2 else numeric[0][1]
+            )
+            
+            mutation_text = (
+                embedded[-1][0] if embedded 
+                else numeric[-2][0].text if len(numeric) >= 2 else numeric[0][0].text
+            ).upper()
+            
+            semantic_text = f"{mutation_text} {description.upper()}"
+            amount_val = abs(mutation_value)
+            
+            is_debit = bool(re.search(r"\b(DB|DEBIT|DEBET|DR|D)\b", semantic_text)) or mutation_value < 0
+            is_credit = bool(re.search(r"\b(CR|CREDIT|KREDIT|C|K)\b", semantic_text))
+            
+    if is_debit:
+        result["debit"], result["credit"] = amount_val, 0.0
+    elif is_credit:
+        result["debit"], result["credit"] = 0.0, amount_val
+    else:
+        # We leave them as None here and let `_validate_balances` reconcile dynamically
+        result["debit"], result["credit"] = None, None
+        
+    result["amount"] = amount_val
+    result["balance"] = balance_val
     return result
 
 
 def _table_model_rows(page: fitz.Page, dpi: int) -> list[list[str]]:
     from table_model import recognize_table_rows
-
     return recognize_table_rows(_render_page(page, min(dpi, 180)))
 
 
@@ -391,18 +432,29 @@ def _rows_from_table_model(table_rows: Sequence[Sequence[str]], page_number: int
 
 def _category(description: str, debit: float | None, credit: float | None) -> str:
     text = description.upper()
-    if "SALDO AWAL" in text:
-        return "Transfer in"
-    if "TARIKAN TUNAI" in text:
-        return "Cash withdrawal"
-    if any(term in text for term in ("BIAYA", "ADM", "ADMIN", "FEE", "PAJAK", "BUNGA")):
-        return "Bank fee"
-    if "CR" in text:
-        return "Revenue"
-    if "DB" in text:
+    if any(term in text for term in ("SALDO AWAL", "OPENING BALANCE", "SAK AWAL")):
+        return "Starting Balance"
+    if any(term in text for term in ("TARIKAN", "TARIK TUNAI", "CASH WITHDRAWAL", "ATM")):
+        return "Cash Withdrawal"
+    if any(term in text for term in ("SETORAN", "SETOR TUNAI", "CASH DEPOSIT")):
+        return "Cash Deposit"
+    if any(term in text for term in ("BIAYA", "ADM", "ADMIN", "FEE", "PAJAK", "TAX", "PROVISI", "MATERAI", "CHARGE")):
+        return "Bank Fee"
+    if any(term in text for term in ("BUNGA", "INTEREST", "JASA GIRO", "NISP")):
+        return "Interest"
+    if any(term in text for term in ("PEMBAYARAN", "PAYMENT", "BELANJA", "PURCHASE", "QRIS", "TOKPED", "SHOPEE", "GOPAY", "OVO", "DANA")):
+        return "Payment/Purchase"
+    if any(term in text for term in ("TRANSFER KELUAR", "TRSF OUT", "TRSF KE", "SWITCHING", "REMITTANCE OUT")):
         return "Transfer Out"
+    if any(term in text for term in ("TRANSFER MASUK", "TRSF IN", "TRSF DARI", "INCOMING")):
+        return "Transfer In"
+    
+    # Universal fallback if description matching fails
+    if (debit or 0) > 0:
+        return "Transfer Out / Debit"
     if (credit or 0) > 0:
-        return "Revenue"
+        return "Transfer In / Credit"
+        
     return "Uncategorized"
 
 
@@ -462,14 +514,40 @@ def extract_statement(
 def _validate_balances(rows: list[ExtractedRow]) -> None:
     previous: float | None = None
     for row in rows:
+        # Dynamically infer Debit/Credit based on mathematical change in balance
         if row.balance is not None and previous is not None:
-            change = (row.credit or 0) - (row.debit or 0)
+            change = row.balance - previous
+            
+            # Reconcile if the bank didn't provide DB/CR markers
             if row.amount is not None and row.debit is None and row.credit is None:
-                change = row.amount
-            if abs((previous + change) - row.balance) > 0.02:
+                if abs(change - row.amount) <= 0.02:
+                    row.debit, row.credit = 0.0, row.amount
+                elif abs(change - (-row.amount)) <= 0.02:
+                    row.debit, row.credit = row.amount, 0.0
+                else:
+                    # Strict math fallback if embedded fees complicate amounts
+                    if change > 0:
+                        row.debit, row.credit = 0.0, row.amount
+                    else:
+                        row.debit, row.credit = row.amount, 0.0
+                        
+        # Handle first row missing DB/CR markers (no previous balance)
+        if row.amount is not None and row.debit is None and row.credit is None:
+            desc_upper = row.description.upper()
+            if any(w in desc_upper for w in ("TARIK", "POTONGAN", "BIAYA", "ADM", "PAJAK", "PEMBAYARAN", "DB", "DR", "D")):
+                row.debit, row.credit = row.amount, 0.0
+            else:
+                row.debit, row.credit = 0.0, row.amount
+
+        # Calculate logical validations
+        calculated_change = (row.credit or 0) - (row.debit or 0)
+        if row.balance is not None and previous is not None:
+            if abs((previous + calculated_change) - row.balance) > 0.02:
                 row.validation.append("balance_check_failed")
+                
         if row.balance is not None:
             previous = row.balance
+            
         if row.date is None:
             row.validation.append("date_missing")
         if not row.description:
