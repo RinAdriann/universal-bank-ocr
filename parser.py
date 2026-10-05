@@ -137,7 +137,17 @@ def _excel_date_value(value: str) -> datetime | str:
 
 def normalize_amount(value: str) -> float | None:
     text = _clean_text(value).upper()
-    if not text or _looks_like_date(text):
+    if not text:
+        return None
+
+    # A value such as 1.234 is normally an Indonesian thousands-formatted
+    # amount, even though DATE_RE can also interpret it as day.month.
+    explicit_date = (
+        re.search(r"\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?", text)
+        or re.search(r"\d{1,2}[-\s./]+[A-Z]{3,9}", text)
+        or re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{2,4}", text)
+    )
+    if explicit_date:
         return None
         
     # Expand markers to catch D, C, K (Kredit), IDR
@@ -171,6 +181,43 @@ def normalize_amount(value: str) -> float | None:
         return -number if negative else number
     except ValueError:
         return None
+
+
+def _looks_like_date_cell(value: str) -> bool:
+    """Avoid classifying a single separator-formatted amount as a date."""
+    if not _looks_like_date(value):
+        return False
+    normalized = normalize_amount(value)
+    return normalized is None or not re.fullmatch(
+        r"\d{1,3}[.,]\d{1,3}", _clean_text(value)
+    )
+
+
+REFERENCE_WORDS = (
+    "REF", "REFERENSI", "REFERENCE", "TELLER", "SANDI", "CHQ", "CHEQUE",
+    "BUKTI", "ACCOUNT", "REKENING", "NO ", "NOMOR", "ID ",
+)
+
+
+def _is_likely_reference_number(cell: Cell, cells: Sequence[Cell]) -> bool:
+    """Filter unformatted reference numbers only when row context supports it."""
+    text = cell.text.upper()
+    digits = re.sub(r"\D", "", text)
+    row_text = " ".join(candidate.text for candidate in cells).upper()
+    has_reference_label = any(word in row_text for word in REFERENCE_WORDS)
+    return (
+        has_reference_label
+        and len(digits) >= 4
+        and not re.search(r"[.,]", text)
+        and normalize_amount(text) is not None
+    )
+
+
+def _contains_direction_marker(value: str) -> bool:
+    return re.search(
+        r"\b(?:DB|DEBIT|DEBET|DR|D|CR|CREDIT|KREDIT|C|K)\b",
+        _clean_text(value).upper(),
+    ) is not None
 
 
 EMBEDDED_AMOUNT_RE = re.compile(
@@ -328,8 +375,15 @@ def _is_transaction_row(row: Sequence[Word]) -> bool:
 
 
 def _classify_cells(cells: Sequence[Cell]) -> dict[str, Any]:
-    date_cell = next((cell for cell in cells if _looks_like_date(cell.text)), None)
-    numeric = [(cell, normalize_amount(cell.text)) for cell in cells]
+    date_cell = next((cell for cell in cells if _looks_like_date_cell(cell.text)), None)
+    direction_cells = [cell for cell in cells if _contains_direction_marker(cell.text)]
+    has_explicit_direction = bool(direction_cells)
+    semantic_text = " ".join(cell.text for cell in cells).upper()
+    numeric = [
+        (cell, normalize_amount(cell.text))
+        for cell in cells
+        if not _is_likely_reference_number(cell, cells)
+    ]
     numeric = [(cell, value) for cell, value in numeric if value is not None]
     non_numeric = [
         cell for cell in cells
@@ -352,8 +406,22 @@ def _classify_cells(cells: Sequence[Cell]) -> dict[str, Any]:
     is_debit = False
     is_credit = False
 
+    # Some statements contain [branch code, mutation, DB/CR] and no saldo
+    # in the row. With an explicit marker, the last numeric cell is the
+    # mutation; earlier numeric cells are identifiers or codes.
+    if has_explicit_direction and len(numeric) >= 2:
+        marked_numeric = [
+            item for item in numeric if _contains_direction_marker(item[0].text)
+        ]
+        _, mutation_value = (
+            marked_numeric[-1] if marked_numeric else numeric[-1]
+        )
+        amount_val = abs(mutation_value)
+        is_debit = bool(re.search(r"\b(DB|DEBIT|DEBET|DR|D)\b", semantic_text))
+        is_credit = bool(re.search(r"\b(CR|CREDIT|KREDIT|C|K)\b", semantic_text))
+
     # Logic for banks (like BNI/Mandiri) that use 3 numeric columns: [Debit, Credit, Balance]
-    if not embedded and len(numeric) >= 3:
+    if amount_val is None and not embedded and len(numeric) >= 3:
         balance_val = numeric[-1][1]
         val1, val2 = numeric[-3][1], numeric[-2][1]
         if val1 > 0 and val2 == 0:
