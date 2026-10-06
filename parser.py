@@ -1,714 +1,413 @@
+﻿"""Universal Indonesian Bank Statement Extractor (PDF/Image -> Excel)."""
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
-from functools import lru_cache
 import io
 import json
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import cv2
-import pymupdf as fitz
 import numpy as np
 import pandas as pd
+import pymupdf as fitz
 
+SUPPORTED_INPUT_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 
-# Broadened header words to include Mandiri, BNI, BRI, BSI, etc.
-HEADER_WORDS = {
-    "tanggal", "tgl", "date", "waktu", "time", "uraian", "keterangan",
-    "deskripsi", "description", "transaksi", "mutasi", "debit", "debet",
-    "kredit", "credit", "saldo", "balance", "nominal", "jumlah", "amount",
-    "penarikan", "withdrawal", "setoran", "deposit", "cabang", "branch",
-    "sandi", "referensi", "ref", "chq", "teller", "kurs", "valuta", "bukti"
+# --------------------------------------------------------------------------- constants
+
+MONTHS = {
+    "jan": 1, "januari": 1, "january": 1, "feb": 2, "pebruari": 2, "februari": 2,
+    "mar": 3, "maret": 3, "apr": 4, "april": 4, "mei": 5, "may": 5, "jun": 6, "juni": 6,
+    "jul": 7, "juli": 7, "agu": 8, "agt": 8, "agustus": 8, "aug": 8, "sep": 9,
+    "september": 9, "okt": 10, "oktober": 10, "oct": 10, "nov": 11, "nopember": 11,
+    "november": 11, "des": 12, "desember": 12, "dec": 12
 }
+_MONTH_ALT = "|".join(sorted(MONTHS, key=len, reverse=True))
 
-# Improved DATE_RE: Replaced strict \b with lookarounds (?<!\d) and (?!\d) to catch 
-# dates mashed with strings by OCR (e.g., "12/04/23TRANSFER").
-DATE_RE = re.compile(
-    r"(?<!\d)(?P<day>\d{1,2})[-./](?P<month>\d{1,2})(?:[-./](?P<year>\d{2,4}))?(?!\d)"
-    r"|(?<!\d)(?P<day_name>\d{1,2})[-\s./]+(?P<month_name>[A-Za-z]{3,9})(?:[-\s./]+(?P<year_name>\d{2,4}))?(?!\d)",
-    re.IGNORECASE,
-)
+DATE_RE = re.compile(rf"^(?P<d>\d{{1,2}})[-\s./]*(?P<mon>{_MONTH_ALT}|\d{{1,2}})(?:[-\s./]*(?P<y>\d{{4}}|\d{{2}}))?(?!\d)", re.IGNORECASE)
 
+OPENING_RE = re.compile(r"\b(SALDO\s+AWAL|SAK\s+AWAL|OPENING\s+BALANCE|BEGINNING\s+BALANCE|SALDO\s+SEBELUMNYA)\b", re.IGNORECASE)
+STOP_RE = re.compile(r"\b(SALDO\s+AKHIR|CLOSING\s+BALANCE|TOTAL|JUMLAH\s+MUTASI|HALAMAN|BERSAMBUNG|CONTINUED)\b", re.IGNORECASE)
 
-@dataclass
-class Word:
-    text: str
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    confidence: float = 1.0
-    source: str = "pdf"
+DEBIT_HINT_RE = re.compile(r"\b(TARIK|TARIKAN|BIAYA|ADM|PAJAK|PEMBAYARAN|BAYAR|PEMBELIAN|DEBIT|DB)\b")
+CREDIT_HINT_RE = re.compile(r"\b(SETOR|SETORAN|BUNGA|JASA GIRO|KREDIT|GAJI|TRSF DARI|TRF DARI|CR)\b")
 
-    @property
-    def center_x(self) -> float:
-        return (self.x0 + self.x1) / 2
+CATEGORY_RULES = [
+    ("Starting Balance", r"SALDO AWAL|OPENING BALANCE|SAK AWAL"),
+    ("Bank Fee", r"BIAYA|ADM|ADMIN|FEE|PAJAK|TAX|PROVISI|MATERAI|CHARGE"),
+    ("Interest", r"BUNGA|INTEREST|JASA GIRO"),
+    ("Cash Withdrawal", r"TARIKAN|TARIK TUNAI|CASH WITHDRAWAL|ATM"),
+    ("Cash Deposit", r"SETORAN|SETOR TUNAI|CASH DEPOSIT"),
+    ("Payment/Purchase", r"PEMBAYARAN|PAYMENT|BELANJA|PURCHASE|QRIS|TOKPED|SHOPEE|GOPAY|OVO|DANA"),
+    ("Transfer Out", r"TRANSFER KELUAR|TRSF OUT|TRSF KE|TRF KE|REMITTANCE OUT|SWITCHING"),
+    ("Transfer In", r"TRANSFER MASUK|TRSF IN|TRSF DARI|TRF DARI|INCOMING"),
+]
+_CATEGORY_RES = [(name, re.compile(rf"\b(?:{pattern})\b")) for name, pattern in CATEGORY_RULES]
 
-    @property
-    def center_y(self) -> float:
-        return (self.y0 + self.y1) / 2
+DIRECTION_MARKERS = {"DB": "debit", "DR": "debit", "D": "debit", "DEBIT": "debit", "DEBET": "debit", "CR": "credit", "C": "credit", "K": "credit"}
 
-    @property
-    def height(self) -> float:
-        return max(1.0, self.y1 - self.y0)
-
-
-@dataclass
-class Cell:
-    text: str
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    confidence: float
-
+# --------------------------------------------------------------------------- data classes
 
 @dataclass
 class ExtractedRow:
     page: int
-    cells: list[Cell]
     raw_text: str
-    date: str | None = None
+    date: date | str | None = None
     description: str = ""
     debit: float | None = None
     credit: float | None = None
-    amount: float | None = None
     balance: float | None = None
-    confidence: float = 0.0
+    pending_mutasi: float | None = None
+    is_opening: bool = False
     validation: list[str] = field(default_factory=list)
+    date_parts: tuple | None = field(default=None, repr=False)
 
+@dataclass(frozen=True)
+class Amount:
+    value: float
+    direction: str | None
+
+# --------------------------------------------------------------------------- parsing logic
 
 def _clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value.replace("\u00a0", " ")).strip()
+    return re.sub(r"\s+", " ", str(value).replace("\u00a0", " ")).strip()
 
+def _match_date(text: str) -> tuple[tuple[int, int, int | None], int] | None:
+    match = DATE_RE.match(text.strip())
+    if not match: return None
+    groups = match.groupdict()
+    day = int(groups["d"])
+    month = MONTHS.get(groups["mon"].lower()) or int(groups["mon"])
+    year = int(groups["y"]) if groups.get("y") else None
+    if year is not None and year < 100: year += 2000
+    if 1 <= day <= 31 and 1 <= month <= 12:
+        return (day, month, year), match.end()
+    return None
 
-def _looks_like_date(value: str) -> bool:
-    return DATE_RE.search(value) is not None
-
-
-def normalize_date(value: str) -> str | None:
-    match = DATE_RE.search(value.strip())
-    return _clean_text(match.group(0)) if match else None
-
-
-def _excel_date_value(value: str) -> datetime | str:
-    match = DATE_RE.fullmatch(value.strip())
-    if not match:
-        return value
-    try:
-        if match.group("day_name"):
-            # Added more Indonesian month variations (e.g. Pebruari, Nopember)
-            month_names = {
-                "jan": 1, "januari": 1, 
-                "feb": 2, "februari": 2, "pebruari": 2,
-                "mar": 3, "maret": 3, 
-                "apr": 4, "april": 4,
-                "mei": 5, "may": 5, 
-                "jun": 6, "juni": 6, 
-                "jul": 7, "juli": 7,
-                "agu": 8, "agt": 8, "agustus": 8, "aug": 8, "august": 8,
-                "sep": 9, "sept": 9, "september": 9, 
-                "okt": 10, "oktober": 10, "oct": 10, "october": 10,
-                "nov": 11, "november": 11, "nop": 11, "nopember": 11,
-                "des": 12, "desember": 12, "dec": 12, "december": 12,
-            }
-            day = int(match.group("day_name"))
-            m_name = match.group("month_name").lower()
-            month = month_names.get(m_name)
-            if not month:
-                return value
-            year_text = match.group("year_name")
-        else:
-            day = int(match.group("day"))
-            month = int(match.group("month"))
-            year_text = match.group("year")
-            
-        year = int(year_text) if year_text else 1900
-        if year < 100:
-            year += 2000
-        return datetime(year, month, day)
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return value
-
-
-def normalize_amount(value: str) -> float | None:
-    text = _clean_text(value).upper()
-    if not text:
-        return None
-
-    # A value such as 1.234 is normally an Indonesian thousands-formatted
-    # amount, even though DATE_RE can also interpret it as day.month.
-    explicit_date = (
-        re.search(r"\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?", text)
-        or re.search(r"\d{1,2}[-\s./]+[A-Z]{3,9}", text)
-        or re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{2,4}", text)
-    )
-    if explicit_date:
-        return None
-        
-    # Expand markers to catch D, C, K (Kredit), IDR
-    negative = text.startswith("-") or ("(" in text and ")" in text)
-    negative = negative or bool(re.search(r"\b(DB|DEBIT|DEBET|DR|D)\b", text))
-    amount_text = re.sub(r"\b(RP|IDR|DB|CR|DEBIT|DEBET|CREDIT|KREDIT|DR|D|C|K)\b", "", text)
+def parse_amount(text: str) -> Amount | None:
+    if not text: return None
+    cleaned = re.sub(r"\s+", "", str(text).upper().replace("RP", "").replace("IDR", ""))
+    match = re.search(r"([+-]?\d[\d.,]*)(DB|DR|D|CR|C|K)?", cleaned)
+    if not match: return None
     
-    if re.search(r"[A-Z]", amount_text):
-        return None
-        
-    text = amount_text
-    text = re.sub(r"[^0-9,.\-]", "", text).replace("-", "")
-    if not text or not re.search(r"\d", text):
-        return None
-        
-    if "," in text and "." in text:
-        decimal_separator = "," if text.rfind(",") > text.rfind(".") else "."
-        thousands_separator = "." if decimal_separator == "," else ","
-        text = text.replace(thousands_separator, "").replace(decimal_separator, ".")
-    elif "," in text:
-        parts = text.split(",")
-        text = "".join(parts[:-1]) + "." + parts[-1] if len(parts[-1]) in (1, 2) else "".join(parts)
-    elif text.count(".") > 1:
-        text = text.replace(".", "")
-    elif "." in text:
-        left, right = text.split(".", 1)
-        text = left + right if len(right) == 3 else text
-        
-    try:
-        number = float(text)
-        return -number if negative else number
-    except ValueError:
-        return None
+    num_str, mark = match.groups()
+    if len(re.sub(r"[^0-9]", "", num_str)) == 0: return None
+    
+    has_dot, has_comma = "." in num_str, "," in num_str
+    if has_dot and has_comma:
+        last_dot, last_comma = num_str.rfind("."), num_str.rfind(",")
+        decimal_sep = "," if last_comma > last_dot else "."
+        num_str = num_str.replace("." if decimal_sep == "," else ",", "").replace(decimal_sep, ".")
+    elif has_comma:
+        parts = num_str.split(",")
+        if len(parts) > 2 or len(parts[-1]) == 3: num_str = num_str.replace(",", "")
+        else: num_str = num_str.replace(",", ".")
+    elif has_dot:
+        parts = num_str.split(".")
+        if len(parts) > 2 or len(parts[-1]) == 3: num_str = num_str.replace(".", "")
+    
+    try: value = float(num_str)
+    except ValueError: return None
+    
+    direction = "debit" if mark in ["DB", "DR", "D"] else "credit" if mark in ["CR", "C", "K"] else None
+    if "-" in cleaned or "(" in cleaned: direction = "debit"
+    elif "+" in cleaned: direction = "credit"
+    
+    return Amount(value, direction)
 
+def _hint_direction(description: str) -> str | None:
+    text = description.upper()
+    debit, credit = bool(DEBIT_HINT_RE.search(text)), bool(CREDIT_HINT_RE.search(text))
+    return "debit" if debit and not credit else "credit" if credit and not debit else None
 
-def _looks_like_date_cell(value: str) -> bool:
-    """Avoid classifying a single separator-formatted amount as a date."""
-    if not _looks_like_date(value):
-        return False
-    normalized = normalize_amount(value)
-    return normalized is None or not re.fullmatch(
-        r"\d{1,3}[.,]\d{1,3}", _clean_text(value)
-    )
+def _merge_string_markers(cells: list[str]) -> list[str]:
+    """Glues trailing 'DB'/'CR' to numbers without deleting the cell (prevents column shifting)."""
+    merged = list(cells)
+    for i in range(1, len(merged)):
+        cell = merged[i]
+        if re.sub(r"[^A-Z]", "", cell.upper()) in DIRECTION_MARKERS and len(cell) <= 6:
+            if parse_amount(merged[i-1]):
+                merged[i-1] = f"{merged[i-1]} {cell.upper()}"
+                merged[i] = "" 
+    return merged
 
-
-REFERENCE_WORDS = (
-    "REF", "REFERENSI", "REFERENCE", "TELLER", "SANDI", "CHQ", "CHEQUE",
-    "BUKTI", "ACCOUNT", "REKENING", "NO ", "NOMOR", "ID ",
-)
-
-
-def _is_likely_reference_number(cell: Cell, cells: Sequence[Cell]) -> bool:
-    """Filter unformatted reference numbers only when row context supports it."""
-    text = cell.text.upper()
-    digits = re.sub(r"\D", "", text)
-    row_text = " ".join(candidate.text for candidate in cells).upper()
-    has_reference_label = any(word in row_text for word in REFERENCE_WORDS)
-    return (
-        has_reference_label
-        and len(digits) >= 4
-        and not re.search(r"[.,]", text)
-        and normalize_amount(text) is not None
-    )
-
-
-def _contains_direction_marker(value: str) -> bool:
-    return re.search(
-        r"\b(?:DB|DEBIT|DEBET|DR|D|CR|CREDIT|KREDIT|C|K)\b",
-        _clean_text(value).upper(),
-    ) is not None
-
-
-EMBEDDED_AMOUNT_RE = re.compile(
-    r"(?<![\w/])(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?"
-    r"|\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?)(?![\w/])"
-)
-
-
-def _embedded_amounts(value: str) -> list[tuple[str, float]]:
-    amounts: list[tuple[str, float]] = []
-    for match in EMBEDDED_AMOUNT_RE.finditer(value):
-        parsed = normalize_amount(match.group(0))
-        if parsed is not None:
-            amounts.append((match.group(0), abs(parsed)))
-    return amounts
-
-
-def _remove_embedded_amounts(value: str) -> str:
-    return _clean_text(EMBEDDED_AMOUNT_RE.sub("", value))
-
+# --------------------------------------------------------------------------- visual & structural mappings
 
 @lru_cache(maxsize=1)
 def _rapidocr_engine() -> Any:
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-    except ImportError as exc:
-        raise RuntimeError("Install dependencies with `pip install -r requirements.txt`.") from exc
+    from rapidocr_onnxruntime import RapidOCR
     return RapidOCR()
-
-
-def _extract_rapidocr(image: np.ndarray) -> list[Word]:
-    ocr = _rapidocr_engine()
-    result, _ = ocr(image)
-    words: list[Word] = []
-    for item in result or []:
-        box, text, confidence = item
-        points = np.asarray(box, dtype=float)
-        words.append(
-            Word(
-                text=_clean_text(str(text)),
-                x0=float(points[:, 0].min()),
-                y0=float(points[:, 1].min()),
-                x1=float(points[:, 0].max()),
-                y1=float(points[:, 1].max()),
-                confidence=float(confidence),
-                source="ocr",
-            )
-        )
-    return [word for word in words if word.text]
-
-
-def _extract_pdf_words(page: fitz.Page) -> list[Word]:
-    words: list[Word] = []
-    for item in page.get_text("words", sort=True):
-        x0, y0, x1, y1, text = item[:5]
-        text = _clean_text(text)
-        if text:
-            words.append(Word(text, x0, y0, x1, y1))
-    return words
-
 
 def _preprocess(image: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, None, 7, 7, 21)
-    return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
+    scale = 1000 / max(gray.shape)
+    small = cv2.resize(gray, None, fx=scale, fy=scale) if scale < 1 else gray
+    _, bw = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h, w = bw.shape
+    score = lambda angle: float(np.var(cv2.warpAffine(bw, cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0), (w, h), flags=cv2.INTER_NEAREST).sum(axis=1)))
+    coarse = max(np.arange(-5, 5.01, 0.5), key=score)
+    angle = float(max(np.arange(coarse - 0.5, coarse + 0.51, 0.1), key=score))
+    if abs(angle) >= 0.3:
+        gray = cv2.warpAffine(gray, cv2.getRotationMatrix2D((gray.shape[1]/2, gray.shape[0]/2), angle, 1.0), (gray.shape[1], gray.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
+def _create_synthetic_pdf(image: np.ndarray) -> fitz.Document:
+    result, _ = _rapidocr_engine()(image)
+    doc = fitz.open()
+    page = doc.new_page(width=image.shape[1], height=image.shape[0])
+    for box, text, _ in result or []:
+        text = _clean_text(str(text))
+        if not text: continue
+        pts = np.asarray(box, dtype=float)
+        x0, y0, y1 = pts[:, 0].min(), pts[:, 1].min(), pts[:, 1].max()
+        page.insert_text((x0, y1 - (y1-y0)*0.2), text, fontsize=max(4, (y1 - y0) * 0.8))
+    return doc
 
-def _digital_page_is_usable(words: Sequence[Word]) -> bool:
-    if len(words) < 8:
-        return False
-    date_count = sum(_looks_like_date(word.text) for word in words)
-    amount_count = sum(normalize_amount(word.text) is not None for word in words)
-    header_count = sum(
-        re.sub(r"[^a-z]", "", word.text.lower()) in HEADER_WORDS for word in words
-    )
-    return date_count >= 1 and amount_count >= 1 and (header_count >= 1 or date_count >= 2)
+def _map_columns(grid: list[list[str]]) -> dict[str, int]:
+    col_map = {"date": -1, "desc_start": -1, "desc_end": -1, "debit": -1, "credit": -1, "mutasi": -1, "saldo": -1, "header_found": False}
+    for row in grid[:15]: 
+        row_str = " ".join(filter(None, row)).lower()
+        if any(w in row_str for w in ["tanggal", "date", "tgl"]) and any(w in row_str for w in ["saldo", "balance", "mutasi", "kredit", "debet", "debit"]):
+            col_map["header_found"] = True
+            for c_idx, cell in enumerate(row):
+                if not cell: continue
+                val = str(cell).lower()
+                if any(w in val for w in ["tanggal", "date", "tgl"]): col_map["date"] = c_idx
+                elif any(w in val for w in ["keterangan", "uraian", "description", "deskripsi"]): col_map["desc_start"] = c_idx
+                elif any(w in val for w in ["debet", "debit", "withdrawal"]): col_map["debit"] = c_idx
+                elif any(w in val for w in ["kredit", "credit", "deposit"]): col_map["credit"] = c_idx
+                elif any(w in val for w in ["mutasi", "amount", "jumlah"]): col_map["mutasi"] = c_idx
+                elif any(w in val for w in ["saldo", "balance"]): col_map["saldo"] = c_idx
+            break
 
+    if not col_map["header_found"]:
+        num_cols = len(grid[0]) if grid else 0
+        col_map["date"] = 0
+        if num_cols >= 6:
+            col_map["saldo"], col_map["credit"], col_map["debit"] = num_cols - 1, num_cols - 2, num_cols - 3
+        elif num_cols == 5:
+            col_map["saldo"], col_map["mutasi"] = 4, 3
+        elif num_cols == 4:
+            col_map["saldo"], col_map["mutasi"] = 3, 2
+            
+    fin_cols = [c for c in [col_map["debit"], col_map["credit"], col_map["mutasi"], col_map["saldo"]] if c > -1]
+    col_map["desc_end"] = min(fin_cols) if fin_cols else (len(grid[0]) if grid else 0)
+    if col_map["desc_start"] == -1: col_map["desc_start"] = col_map["date"] + 1
+    return col_map
 
-def _render_page(page: fitz.Page, dpi: int) -> np.ndarray:
-    scale = dpi / 72
-    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-    image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    if pix.n == 4:
-        return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-    return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+# --------------------------------------------------------------------------- transaction assembly
 
-
-def _page_words(page: fitz.Page, dpi: int = 220) -> tuple[list[Word], bool]:
-    pdf_words = _extract_pdf_words(page)
-    page_area = max(1.0, page.rect.width * page.rect.height)
-    text_area = sum((word.x1 - word.x0) * (word.y1 - word.y0) for word in pdf_words)
-    has_reasonable_text_density = text_area / page_area < 0.25
-    is_digital = has_reasonable_text_density and _digital_page_is_usable(pdf_words)
-    if is_digital:
-        return pdf_words, True
-    image = _render_page(page, dpi)
-    return _extract_rapidocr(_preprocess(image)), False
-
-
-def _group_rows(words: Sequence[Word]) -> list[list[Word]]:
-    if not words:
-        return []
-    tolerance = max(3.0, float(np.median([word.height for word in words])) * 0.7)
-    rows: list[list[Word]] = []
-    row_centers: list[float] = []
-    for word in sorted(words, key=lambda item: (item.center_y, item.x0)):
-        candidates = [index for index, center in enumerate(row_centers)
-                      if abs(word.center_y - center) <= tolerance]
-        if not candidates:
-            rows.append([word])
-            row_centers.append(word.center_y)
-            continue
-        index = min(candidates, key=lambda candidate: abs(word.center_y - row_centers[candidate]))
-        rows[index].append(word)
-        row_centers[index] = sum(item.center_y for item in rows[index]) / len(rows[index])
-    return [sorted(row, key=lambda item: item.x0) for row in sorted(rows, key=lambda row: min(item.y0 for item in row))]
-
-
-def _is_header(row: Sequence[Word]) -> bool:
-    normalized = {re.sub(r"[^a-z]", "", word.text.lower()) for word in row}
-    return len(normalized & HEADER_WORDS) >= 2
-
-
-def _row_to_cells(row: Sequence[Word], gap_factor: float = 1.8) -> list[Cell]:
-    if not row:
-        return []
-    median_height = float(np.median([word.height for word in row]))
-    cells: list[list[Word]] = [[row[0]]]
-    for word in row[1:]:
-        previous = cells[-1][-1]
-        gap = word.x0 - previous.x1
-        if gap > median_height * gap_factor:
-            cells.append([word])
-        else:
-            cells[-1].append(word)
-    return [
-        Cell(
-            text=_clean_text(" ".join(word.text for word in cell)),
-            x0=min(word.x0 for word in cell),
-            y0=min(word.y0 for word in cell),
-            x1=max(word.x1 for word in cell),
-            y1=max(word.y1 for word in cell),
-            confidence=float(np.mean([word.confidence for word in cell])),
-        )
-        for cell in cells
-    ]
-
-
-def _is_transaction_row(row: Sequence[Word]) -> bool:
-    text = _clean_text(" ".join(word.text for word in row))
-    has_date = _looks_like_date(text)
-    numeric_values = sum(normalize_amount(word.text) is not None for word in row)
-    has_embedded_amount = bool(_embedded_amounts(text))
-    return has_date and (numeric_values >= 1 or has_embedded_amount)
-
-
-def _classify_cells(cells: Sequence[Cell]) -> dict[str, Any]:
-    date_cell = next((cell for cell in cells if _looks_like_date_cell(cell.text)), None)
-    direction_cells = [cell for cell in cells if _contains_direction_marker(cell.text)]
-    has_explicit_direction = bool(direction_cells)
-    semantic_text = " ".join(cell.text for cell in cells).upper()
-    numeric = [
-        (cell, normalize_amount(cell.text))
-        for cell in cells
-        if not _is_likely_reference_number(cell, cells)
-    ]
-    numeric = [(cell, value) for cell, value in numeric if value is not None]
-    non_numeric = [
-        cell for cell in cells
-        if cell is not date_cell and normalize_amount(cell.text) is None
-    ]
-    description_cells = non_numeric
-    description = _clean_text(" ".join(cell.text for cell in description_cells))
-    embedded = _embedded_amounts(description)
-    if embedded:
-        description = _remove_embedded_amounts(description)
+def _extract_page_rows(page: fitz.Page, page_num: int, global_map: dict | None) -> list[ExtractedRow]:
+    tabs = page.find_tables(strategy="text", snap_tolerance=5.0)
+    rows = []
+    for table in tabs.tables:
+        grid = table.extract()
+        if not grid: continue
         
-    result: dict[str, Any] = {
-        "date": normalize_date(date_cell.text) if date_cell else None,
-        "description": description,
-        "numbers": numeric,
-    }
-    
-    balance_val = None
-    amount_val = None
-    is_debit = False
-    is_credit = False
-
-    # Some statements contain [branch code, mutation, DB/CR] and no saldo
-    # in the row. With an explicit marker, the last numeric cell is the
-    # mutation; earlier numeric cells are identifiers or codes.
-    if has_explicit_direction and len(numeric) >= 2:
-        marked_numeric = [
-            item for item in numeric if _contains_direction_marker(item[0].text)
-        ]
-        _, mutation_value = (
-            marked_numeric[-1] if marked_numeric else numeric[-1]
-        )
-        amount_val = abs(mutation_value)
-        is_debit = bool(re.search(r"\b(DB|DEBIT|DEBET|DR|D)\b", semantic_text))
-        is_credit = bool(re.search(r"\b(CR|CREDIT|KREDIT|C|K)\b", semantic_text))
-
-    # Logic for banks (like BNI/Mandiri) that use 3 numeric columns: [Debit, Credit, Balance]
-    if amount_val is None and not embedded and len(numeric) >= 3:
-        balance_val = numeric[-1][1]
-        val1, val2 = numeric[-3][1], numeric[-2][1]
-        if val1 > 0 and val2 == 0:
-            is_debit, amount_val = True, val1
-        elif val2 > 0 and val1 == 0:
-            is_credit, amount_val = True, val2
-        else:
-            amount_val = val1 or val2
-
-    # Logic for embedded/BCA style or ambiguous 2 column [Amount, Balance]
-    if amount_val is None:
-        if numeric or embedded:
-            if numeric:
-                balance_val = numeric[-1][1] if (len(numeric) >= 2 or embedded) else None
-            
-            mutation_value = embedded[-1][1] if embedded else (
-                numeric[-2][1] if len(numeric) >= 2 else numeric[0][1]
-            )
-            
-            mutation_text = (
-                embedded[-1][0] if embedded 
-                else numeric[-2][0].text if len(numeric) >= 2 else numeric[0][0].text
-            ).upper()
-            
-            semantic_text = f"{mutation_text} {description.upper()}"
-            amount_val = abs(mutation_value)
-            
-            is_debit = bool(re.search(r"\b(DB|DEBIT|DEBET|DR|D)\b", semantic_text)) or mutation_value < 0
-            is_credit = bool(re.search(r"\b(CR|CREDIT|KREDIT|C|K)\b", semantic_text))
-            
-    if is_debit:
-        result["debit"], result["credit"] = amount_val, 0.0
-    elif is_credit:
-        result["debit"], result["credit"] = 0.0, amount_val
-    else:
-        # We leave them as None here and let `_validate_balances` reconcile dynamically
-        result["debit"], result["credit"] = None, None
+        current_map = _map_columns(grid)
+        col_map = current_map if current_map["header_found"] else (global_map or current_map)
+        drafts, curr_draft = [], None
         
-    result["amount"] = amount_val
-    result["balance"] = balance_val
-    return result
-
-
-def _table_model_rows(page: fitz.Page, dpi: int) -> list[list[str]]:
-    from table_model import recognize_table_rows
-    return recognize_table_rows(_render_page(page, min(dpi, 180)))
-
-
-def _rows_from_table_model(table_rows: Sequence[Sequence[str]], page_number: int) -> list[ExtractedRow]:
-    extracted: list[ExtractedRow] = []
-    for values in table_rows:
-        cells = [
-            Cell(text=_clean_text(value), x0=index, y0=0, x1=index + 1, y1=1, confidence=0.75)
-            for index, value in enumerate(values) if _clean_text(value)
-        ]
-        if not cells or _is_header([Word(cell.text, cell.x0, 0, cell.x1, 1) for cell in cells]):
-            continue
-        words = [Word(cell.text, cell.x0, 0, cell.x1, 1, confidence=cell.confidence) for cell in cells]
-        if not _is_transaction_row(words):
-            continue
-        classified = _classify_cells(cells)
-        extracted.append(ExtractedRow(
-            page=page_number,
-            cells=cells,
-            raw_text=_clean_text(" ".join(cell.text for cell in cells)),
-            date=classified["date"],
-            description=classified["description"],
-            debit=classified.get("debit"),
-            credit=classified.get("credit"),
-            amount=classified.get("amount"),
-            balance=classified.get("balance"),
-            confidence=0.75,
-        ))
-    return extracted
-
-
-def _category(description: str, debit: float | None, credit: float | None) -> str:
-    text = description.upper()
-    if any(term in text for term in ("SALDO AWAL", "OPENING BALANCE", "SAK AWAL")):
-        return "Starting Balance"
-    if any(term in text for term in ("TARIKAN", "TARIK TUNAI", "CASH WITHDRAWAL", "ATM")):
-        return "Cash Withdrawal"
-    if any(term in text for term in ("SETORAN", "SETOR TUNAI", "CASH DEPOSIT")):
-        return "Cash Deposit"
-    if any(term in text for term in ("BIAYA", "ADM", "ADMIN", "FEE", "PAJAK", "TAX", "PROVISI", "MATERAI", "CHARGE")):
-        return "Bank Fee"
-    if any(term in text for term in ("BUNGA", "INTEREST", "JASA GIRO", "NISP")):
-        return "Interest"
-    if any(term in text for term in ("PEMBAYARAN", "PAYMENT", "BELANJA", "PURCHASE", "QRIS", "TOKPED", "SHOPEE", "GOPAY", "OVO", "DANA")):
-        return "Payment/Purchase"
-    if any(term in text for term in ("TRANSFER KELUAR", "TRSF OUT", "TRSF KE", "SWITCHING", "REMITTANCE OUT")):
-        return "Transfer Out"
-    if any(term in text for term in ("TRANSFER MASUK", "TRSF IN", "TRSF DARI", "INCOMING")):
-        return "Transfer In"
-    
-    # Universal fallback if description matching fails
-    if (debit or 0) > 0:
-        return "Transfer Out / Debit"
-    if (credit or 0) > 0:
-        return "Transfer In / Credit"
+        for row in grid:
+            clean_row = _merge_string_markers([_clean_text(c) if c else "" for c in row])
+            row_text = " ".join(clean_row).strip()
+            if not row_text or STOP_RE.search(row_text): continue
+            
+            date_val, date_match = None, None
+            if col_map["date"] != -1 and col_map["date"] < len(clean_row) and clean_row[col_map["date"]]:
+                date_match = _match_date(clean_row[col_map["date"]])
+            if not date_match: date_match = _match_date(row_text)
+            
+            if date_match:
+                date_val = clean_row[col_map["date"]] if col_map["date"] < len(clean_row) else row_text[:date_match[1]]
+                if curr_draft: drafts.append(curr_draft)
+                curr_draft = {'date_parts': date_match[0], 'desc': [], 'debit': "", 'credit': "", 'mutasi': "", 'saldo': "", 'raw': []}
+                
+            if curr_draft is None and OPENING_RE.search(row_text):
+                curr_draft = {'date_parts': None, 'desc': [], 'debit': "", 'credit': "", 'mutasi': "", 'saldo': "", 'raw': [], 'is_opening': True}
+                
+            if curr_draft:
+                curr_draft['raw'].append(row_text)
+                desc_parts = clean_row[col_map["desc_start"]:col_map["desc_end"]]
+                
+                if date_match and col_map["date"] < len(clean_row) and clean_row[col_map["date"]].startswith(date_val or ""):
+                    if desc_parts and desc_parts[0].startswith(date_val or ""):
+                        desc_parts[0] = desc_parts[0][len(date_val or ""):].strip(" -./")
+                        
+                curr_draft['desc'].extend([p for p in desc_parts if p])
+                for key in ["debit", "credit", "mutasi", "saldo"]:
+                    idx = col_map[key]
+                    if idx != -1 and idx < len(clean_row) and clean_row[idx]:
+                        val = clean_row[idx].strip()
+                        if val.upper() in ["DB", "DR", "CR", "C", "K"] and curr_draft[key]:
+                            curr_draft[key] = f"{curr_draft[key]} {val}"
+                        else:
+                            curr_draft[key] = val
+                            
+        if curr_draft: drafts.append(curr_draft)
         
-    return "Uncategorized"
+        for d in drafts:
+            debit_a, credit_a, mutasi_a, saldo_a = map(parse_amount, [d['debit'], d['credit'], d['mutasi'], d['saldo']])
+            final_debit = final_credit = pending_mutasi = None
+            
+            if debit_a: final_debit = debit_a.value
+            if credit_a: final_credit = credit_a.value
+            
+            if mutasi_a:
+                if mutasi_a.direction == "debit": final_debit = mutasi_a.value
+                elif mutasi_a.direction == "credit": final_credit = mutasi_a.value
+                else: pending_mutasi = mutasi_a.value
 
-
-def extract_statement(
-    pdf_path: str | Path,
-    dpi: int = 220,
-    use_table_model: bool = False,
-) -> dict[str, Any]:
-    document = fitz.open(str(pdf_path))
-    rows: list[ExtractedRow] = []
-    pages: list[dict[str, Any]] = []
-    for page_number, page in enumerate(document, start=1):
-        words, is_digital = _page_words(page, dpi=dpi)
-        grouped = _group_rows(words)
-        page_rows: list[ExtractedRow] = []
-        table_model_used = False
-        if use_table_model:
-            table_rows = _table_model_rows(page, dpi)
-            page_rows = _rows_from_table_model(table_rows, page_number)
-            table_model_used = bool(page_rows)
-            if page_rows:
-                rows.extend(page_rows)
-        for grouped_row in grouped:
-            if table_model_used:
-                break
-            if _is_header(grouped_row):
-                continue
-            if not _is_transaction_row(grouped_row):
-                continue
-            cells = _row_to_cells(grouped_row)
-            classified = _classify_cells(cells)
-            row = ExtractedRow(
-                page=page_number,
-                cells=cells,
-                raw_text=_clean_text(" ".join(word.text for word in grouped_row)),
-                date=classified["date"],
-                description=classified["description"],
-                debit=classified.get("debit"),
-                credit=classified.get("credit"),
-                amount=classified.get("amount"),
-                balance=classified.get("balance"),
-                confidence=float(np.mean([cell.confidence for cell in cells])),
-            )
-            page_rows.append(row)
-            rows.append(row)
-        pages.append({
-            "page": page_number,
-            "digital": is_digital,
-            "word_count": len(words),
-            "rows": len(page_rows),
-            "table_model": "paddleocr" if table_model_used else "coordinate-fallback",
-        })
-    _validate_balances(rows)
-    return {"pages": pages, "rows": rows}
-
+            rows.append(ExtractedRow(
+                page=page_num, raw_text=_clean_text(" ".join(d['raw'])),
+                description=_clean_text(" ".join(d['desc'])),
+                debit=final_debit, credit=final_credit, balance=saldo_a.value if saldo_a else None,
+                pending_mutasi=pending_mutasi, is_opening=d.get('is_opening', False),
+                date_parts=d['date_parts']
+            ))
+    return rows
 
 def _validate_balances(rows: list[ExtractedRow]) -> None:
-    previous: float | None = None
-    for row in rows:
-        # Dynamically infer Debit/Credit based on mathematical change in balance
-        if row.balance is not None and previous is not None:
-            change = row.balance - previous
-            
-            # Reconcile if the bank didn't provide DB/CR markers
-            if row.amount is not None and row.debit is None and row.credit is None:
-                if abs(change - row.amount) <= 0.02:
-                    row.debit, row.credit = 0.0, row.amount
-                elif abs(change - (-row.amount)) <= 0.02:
-                    row.debit, row.credit = row.amount, 0.0
-                else:
-                    # Strict math fallback if embedded fees complicate amounts
-                    if change > 0:
-                        row.debit, row.credit = 0.0, row.amount
-                    else:
-                        row.debit, row.credit = row.amount, 0.0
-                        
-        # Handle first row missing DB/CR markers (no previous balance)
-        if row.amount is not None and row.debit is None and row.credit is None:
-            desc_upper = row.description.upper()
-            if any(w in desc_upper for w in ("TARIK", "POTONGAN", "BIAYA", "ADM", "PAJAK", "PEMBAYARAN", "DB", "DR", "D")):
-                row.debit, row.credit = row.amount, 0.0
+    """Forward sweep to deduce missing Mutasi directions and calculate dropped Saldos."""
+    dates = [r.date for r in rows if isinstance(r.date, date)]
+    chronological = rows[::-1] if len(dates) >= 2 and dates[0] > dates[-1] else rows
+    
+    prev_balance = None
+    for row in chronological:
+        if row.is_opening and row.balance is not None:
+            prev_balance = row.balance
+            break
+        elif row.balance is not None:
+            prev_balance = row.balance - (row.credit or 0.0) + (row.debit or 0.0)
+            break
+
+    for row in chronological:
+        if row.pending_mutasi is not None:
+            if row.balance is not None and prev_balance is not None:
+                delta = row.balance - prev_balance
+                if abs(delta + row.pending_mutasi) < 0.02: row.debit, row.credit = row.pending_mutasi, None
+                elif abs(delta - row.pending_mutasi) < 0.02: row.debit, row.credit = None, row.pending_mutasi
+                else: 
+                    dir_hint = _hint_direction(row.description)
+                    if dir_hint == "debit": row.debit = row.pending_mutasi
+                    elif dir_hint == "credit": row.credit = row.pending_mutasi
+                    else: row.debit = row.pending_mutasi
             else:
-                row.debit, row.credit = 0.0, row.amount
-
-        # Calculate logical validations
-        calculated_change = (row.credit or 0) - (row.debit or 0)
-        if row.balance is not None and previous is not None:
-            if abs((previous + calculated_change) - row.balance) > 0.02:
-                row.validation.append("balance_check_failed")
+                dir_hint = _hint_direction(row.description)
+                if dir_hint == "debit": row.debit = row.pending_mutasi
+                elif dir_hint == "credit": row.credit = row.pending_mutasi
+                else: row.debit = row.pending_mutasi
                 
-        if row.balance is not None:
-            previous = row.balance
+        if row.balance is None and prev_balance is not None and not row.is_opening:
+            row.balance = prev_balance + (row.credit or 0.0) - (row.debit or 0.0)
+            row.validation.append("saldo_calculated")
             
-        if row.date is None:
-            row.validation.append("date_missing")
-        if not row.description:
-            row.validation.append("description_missing")
-        if row.confidence < 0.75:
-            row.validation.append("low_ocr_confidence")
+        if row.balance is not None: prev_balance = row.balance
 
+def _apply_dates(rows: Sequence[ExtractedRow], year: int | None) -> None:
+    for row in rows:
+        if row.date_parts is None: continue
+        day, month, row_year = row.date_parts
+        row_year = row_year or year
+        if row_year is None: row.date = f"{day:02d}/{month:02d}"
+        else:
+            try: row.date = date(row_year, month, day)
+            except ValueError: row.validation.append("date_invalid")
 
-def rows_dataframe(result: dict[str, Any]) -> pd.DataFrame:
-    records = []
-    for row in result["rows"]:
-        records.append({
-            "Tanggal": row.date or "",
+# --------------------------------------------------------------------------- Input & Output
+
+def extract_statement(pdf_path: str | Path, dpi: int = 220) -> dict[str, Any]:
+    input_path = Path(pdf_path)
+    if input_path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+        raise ValueError(f"Unsupported file format. Needs: {', '.join(SUPPORTED_INPUT_SUFFIXES)}")
+
+    rows, pages, all_words = [], [], []
+    is_image = input_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+    doc = _create_synthetic_pdf(_preprocess(cv2.imread(str(input_path)))) if is_image else fitz.open(str(input_path))
+        
+    try:
+        global_map = None
+        for page in doc:
+            tabs = page.find_tables(strategy="text", snap_tolerance=5.0)
+            if tabs.tables:
+                temp_map = _map_columns(tabs.tables[0].extract())
+                if temp_map["header_found"]:
+                    global_map = temp_map
+                    break
+                    
+        for page_number, page in enumerate(doc, start=1):
+            if not is_image and len(page.get_text().split()) < 8:
+                syn_doc = _create_synthetic_pdf(_preprocess(cv2.cvtColor(np.frombuffer(page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False).samples, dtype=np.uint8).reshape(page.rect.height, page.rect.width, 3), cv2.COLOR_RGB2BGR)))
+                usable_page = syn_doc[0]
+            else:
+                usable_page, syn_doc = page, None
+                
+            page_rows = _extract_page_rows(usable_page, page_number, global_map)
+            rows.extend(page_rows)
+            all_words.extend(usable_page.get_text("words"))
+            pages.append({"page": page_number, "rows": len(page_rows)})
+            if syn_doc: syn_doc.close()
+    finally:
+        doc.close()
+
+    explicit_years = [r.date_parts[2] for r in rows if r.date_parts and r.date_parts[2]]
+    if not explicit_years: explicit_years = [int(m.group(1)) for w in all_words for m in re.finditer(r"(?<!\d)(20\d{2})(?!\d)", w[4])]
+    explicit_years = [y for y in explicit_years if 2000 <= y <= 2100]
+    year = Counter(explicit_years).most_common(1)[0][0] if explicit_years else None
+
+    _apply_dates(rows, year)
+    _validate_balances(rows)
+    return {"pages": pages, "rows": rows, "document_year": year}
+
+def _category(description: str, debit: float | None, credit: float | None) -> str:
+    if not description: return "Uncategorized"
+    for name, pattern in _CATEGORY_RES:
+        if pattern.search(description.upper()): return name
+    return "Transfer Out / Debit" if (debit or 0) > 0 else "Transfer In / Credit" if (credit or 0) > 0 else "Uncategorized"
+
+def excel_bytes(result: dict[str, Any]) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame([{
+            "Tanggal": row.date if row.date is not None else "",
             "Kredit": row.credit,
             "Debit": row.debit,
             "Saldo": row.balance,
             "Deskripsi": row.description,
             "Kategori Transaksi": _category(row.description, row.debit, row.credit),
-        })
-    return pd.DataFrame(records)
-
-
-def review_dataframe(result: dict[str, Any]) -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "Halaman": row.page,
-            "Confidence": round(row.confidence, 3),
-            "Human review status": "Needs review" if row.validation else "Pending review",
-            "Validation flags": ", ".join(row.validation),
-            "Full detected text": row.raw_text,
-        }
-        for row in result["rows"]
-    ])
-
-
-def excel_bytes(result: dict[str, Any]) -> bytes:
-    output = io.BytesIO()
-    detail_dataframe = rows_dataframe(result)
-    if not detail_dataframe.empty:
-        detail_dataframe["Tanggal"] = detail_dataframe["Tanggal"].apply(
-            lambda value: _excel_date_value(value) if value else value
-        )
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        detail_dataframe.to_excel(
-            writer, sheet_name="Detail transaksi rekening - 1", index=False
-        )
-        review_dataframe(result).to_excel(writer, sheet_name="Review", index=False)
-        detail_sheet = writer.sheets["Detail transaksi rekening - 1"]
-        detail_sheet.freeze_panes = "A2"
-        for column, width in {"A": 14, "B": 16, "C": 16, "D": 16, "E": 80, "F": 22}.items():
-            detail_sheet.column_dimensions[column].width = width
-        review_sheet = writer.sheets["Review"]
-        review_sheet.freeze_panes = "A2"
-        for column, width in {"A": 12, "B": 14, "C": 22, "D": 28, "E": 100}.items():
-            review_sheet.column_dimensions[column].width = width
-        for cell in detail_sheet["A"][1:]:
-            if isinstance(cell.value, datetime):
-                cell.number_format = "dd/mm" if cell.value.year == 1900 else "dd/mm/yyyy"
+        } for row in result["rows"]]).to_excel(writer, sheet_name="Detail transaksi rekening - 1", index=False)
+        
+        pd.DataFrame([{
+            "Halaman": row.page, "Human review status": "Needs review" if row.validation else "Pending review",
+            "Validation flags": ", ".join(row.validation), "Full detected text": row.raw_text,
+        } for row in result["rows"]]).to_excel(writer, sheet_name="Review", index=False)
+        
+        for name in writer.sheets:
+            sheet = writer.sheets[name]
+            sheet.freeze_panes = "A2"
+            for col, w in zip(["A", "B", "C", "D", "E", "F"], [14, 16, 16, 16, 80, 22] if name == "Detail transaksi rekening - 1" else [12, 18, 28, 100]): sheet.column_dimensions[col].width = w
+            if name == "Detail transaksi rekening - 1":
+                for r in sheet.iter_rows(min_row=2):
+                    if isinstance(r[0].value, (date, datetime)): r[0].number_format = "dd/mm/yyyy"
+                    for c in r[1:4]: c.number_format = "#,##0.00"
     return output.getvalue()
 
-
-def jsonable(result: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "pages": result["pages"],
-        "rows": [
-            {
-                **{key: value for key, value in asdict(row).items() if key != "cells"},
-                "cells": [asdict(cell) for cell in row.cells],
-            }
-            for row in result["rows"]
-        ],
-    }
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract Indonesian bank statement transactions.")
-    parser.add_argument("pdf", type=Path)
+    parser = argparse.ArgumentParser(description="Extract Indonesian bank statements to Excel.")
+    parser.add_argument("file", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output"))
-    parser.add_argument("--dpi", type=int, default=220)
-    parser.add_argument(
-        "--table-model",
-        action="store_true",
-        help="Use optional PaddleOCR table recognition before coordinate fallback.",
-    )
     args = parser.parse_args()
-    result = extract_statement(args.pdf, dpi=args.dpi, use_table_model=args.table_model)
+    
+    result = extract_statement(args.file)
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / "transactions.json").write_text(
-        json.dumps(jsonable(result), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
     (args.output / "transactions.xlsx").write_bytes(excel_bytes(result))
     print(f"Extracted {len(result['rows'])} transaction rows to {args.output}")
-
 
 if __name__ == "__main__":
     main()
