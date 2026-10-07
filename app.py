@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-from parser import _category, excel_bytes, extract_statement
+from component import category, excel_bytes, extract_statement, flow
 
 st.set_page_config(page_title="Indonesian Bank Statement Extractor", layout="wide")
 st.title("PDF/Image to Excel")
@@ -34,9 +34,10 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
                     "Tanggal": row.date if row.date is not None else "",
                     "Kredit": row.credit,
                     "Debit": row.debit,
+                    "Arus": flow(row.debit, row.credit),
                     "Saldo": row.balance,
                     "Deskripsi": row.description,
-                    "Kategori Transaksi": _category(
+                    "Kategori Transaksi": category(
                         row.description, row.debit, row.credit
                     ),
                 }
@@ -46,6 +47,7 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
                 "Tanggal",
                 "Kredit",
                 "Debit",
+                "Arus",
                 "Saldo",
                 "Deskripsi",
                 "Kategori Transaksi",
@@ -62,6 +64,14 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
 
         if failed:
             st.warning(f"{failed} row(s) need review")
+
+        summary = result.get("summary", {})
+        if summary.get("chain_reconciles") is True:
+            st.info("Balance check passed: opening + credits - debits = closing balance.")
+        elif summary.get("chain_reconciles") is False:
+            st.warning("Balance check failed: opening + credits - debits does not equal the closing balance. Review flagged rows.")
+        if summary.get("printed_totals_match") is False:
+            st.warning("Extracted totals differ from the totals printed on the statement.")
 
         # Render the dataframe in the UI
         st.dataframe(dataframe, use_container_width=True, hide_index=True)
@@ -103,6 +113,7 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
             data=json.dumps(
                 {
                     "document_year": result.get("document_year"),
+                    "summary": result.get("summary"),
                     "pages": result["pages"],
                     "rows": json_rows,
                 },
