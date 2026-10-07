@@ -62,15 +62,15 @@ boxes to improve the reconstruction rules for representative documents.
 
 ## Package layout
 
-The implementation is organized behind the `bank_ocr` package boundary:
+The implementation is organized behind the `component` package boundary:
 
-- `bank_ocr/extractor.py` contains OCR, layout learning, row assembly, and
+- `component/extractor.py` contains OCR, layout learning, row assembly, and
   balance-context reconciliation.
-- `bank_ocr/reconciliation.py` exposes balance reconciliation independently
+- `component/reconciliation.py` exposes balance reconciliation independently
   from file and UI concerns.
-- `bank_ocr/categories.py` contains transaction categorization.
-- `bank_ocr/export.py` contains Excel serialization.
+- `component/categories.py` contains transaction categorization.
+- `component/export.py` contains Excel serialization.
 - `parser.py` remains a small compatibility/CLI facade for existing commands.
 
 New application code should import `extract_statement`, `excel_bytes`, and
-`category` from `bank_ocr` rather than importing parser internals.
+`category` from `component` rather than importing parser internals.
