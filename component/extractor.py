@@ -1,4 +1,4 @@
-"""Main orchestrator for the bank statement extractor."""
+"""Main extractor."""
 
 import argparse
 import re

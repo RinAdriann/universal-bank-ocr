@@ -312,11 +312,16 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
     state.layout = layout
 
     def text_role(cell: Cell) -> str:
-        role = "other"
+        role = None
         for col in text_cols:
             if col["start"] - 1.0 * u <= cell.x0:
                 role = col["role"]
-        return role
+
+        if role is None or role =="other":
+            if not cell.money and not _PURE_TIME_RE.match(cell.text):
+                return "desc"
+            
+        return role or "other"
 
     rows: list[ExtractedRow] = []
     cur: ExtractedRow | None = None
@@ -416,15 +421,15 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
                     cur.validation.append("amount_column_inferred")
                     continue
             role = text_role(c)
-            if role == "desc":
+            if role in ("desc", "ref"):
                 desc_parts.append(c.text)
-            elif role == "ref":
-                ref_parts.append(c.text)
             elif role == "extra":
                 extra_parts.append(c.text)
             elif role == "date":
                 if not _PURE_TIME_RE.match(c.text):
                     ref_parts.append(c.text)
+            elif role == "other" and not c.money:
+                desc_parts.append(c.text)
     commit()
 
     kept = [r for r in rows if r.is_opening or r.balance is not None or r.debit or r.credit or r.pending_mutasi]

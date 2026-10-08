@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip uninstall -y opencv-python \
     && pip install --no-cache-dir --force-reinstall opencv-python-headless
 
-COPY parser.py app.py /app/
+COPY component /app/component/ 
+COPY app.py /app/
 
 CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0"]
