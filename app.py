@@ -1,5 +1,8 @@
 import os
 import tempfile
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import date, datetime
 
@@ -8,6 +11,9 @@ import pandas as pd
 import streamlit as st
 
 from component import category, excel_bytes, extract_statement, flow
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Indonesian Bank Statement Extractor", layout="wide")
 st.title("PDF/Image to Excel")
@@ -18,15 +24,34 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None and st.button("Extract", type="primary"):
+    started_at = time.perf_counter()
+    logger.info("Extraction started: %s", uploaded_file.name)
     suffix = os.path.splitext(uploaded_file.name)[1].lower() or ".pdf"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temporary_file:
         temporary_file.write(uploaded_file.getvalue())
         pdf_path = temporary_file.name
 
     try:
+        timer_placeholder = st.empty()
         with st.spinner("Extracting transactions..."):
-            result = extract_statement(pdf_path)
-        excel_data = excel_bytes(result)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(extract_statement, pdf_path)
+                while not future.done():
+                    elapsed_seconds = time.perf_counter() - started_at
+                    timer_placeholder.caption(
+                        f"Processing time: {elapsed_seconds:.2f} seconds"
+                    )
+                    time.sleep(0.2)
+                result = future.result()
+                excel_data = excel_bytes(result)
+        elapsed_seconds = time.perf_counter() - started_at
+        timer_placeholder.caption(f"Processing time: {elapsed_seconds:.2f} seconds")
+        logger.info(
+            "Extraction finished: %s rows from %s pages in %.3f seconds",
+            len(result["rows"]),
+            len(result["pages"]),
+            elapsed_seconds,
+        )
 
         dataframe = pd.DataFrame(
             [
@@ -34,7 +59,6 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
                     "Tanggal": row.date if row.date is not None else "",
                     "Kredit": row.credit,
                     "Debit": row.debit,
-                    "Arus": flow(row.debit, row.credit),
                     "Saldo": row.balance,
                     "Deskripsi": row.description,
                     "Kategori Transaksi": category(
@@ -47,7 +71,6 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
                 "Tanggal",
                 "Kredit",
                 "Debit",
-                "Arus",
                 "Saldo",
                 "Deskripsi",
                 "Kategori Transaksi",
@@ -128,6 +151,8 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
             st.json(result["pages"])
 
     except Exception as exc:
+        elapsed_seconds = time.perf_counter() - started_at
+        logger.exception("Extraction failed after %.3f seconds", elapsed_seconds)
         st.error(str(exc))
     finally:
         if os.path.exists(pdf_path):
