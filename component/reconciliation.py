@@ -3,7 +3,7 @@
 from typing import Any
 from .models import ExtractedRow
 from .constants import OPENING_RE, _TOL
-from .parser import _hint_direction
+from .parser import _explicit_direction, _hint_direction
 
 
 def _narrative(row: ExtractedRow) -> str:
@@ -101,7 +101,8 @@ def reconcile(rows: list[ExtractedRow], opening_hint: float | None = None) -> di
             info["inferred_opening_balance"] = prev
 
     for row in seq_body:
-        narrative_hint = row.pending_dir or _hint_direction(_narrative(row))
+        explicit_hint = _explicit_direction(row.raw_text)
+        narrative_hint = explicit_hint or row.pending_dir or _hint_direction(_narrative(row))
         if narrative_hint == "credit" and row.debit and not row.credit:
             row.credit, row.debit = row.debit, None
             row.validation.append("direction_corrected")
@@ -146,7 +147,7 @@ def reconcile(rows: list[ExtractedRow], opening_hint: float | None = None) -> di
         elif signed is not None and row.balance is not None and prev is not None:
             d = row.balance - prev
             if abs(d - signed) >= _TOL:
-                if abs(d + signed) < _TOL:
+                if explicit_hint is None and abs(d + signed) < _TOL:
                     row.debit, row.credit = row.credit, row.debit
                     row.validation.append("direction_corrected")
                 else:
