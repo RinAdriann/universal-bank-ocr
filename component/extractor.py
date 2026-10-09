@@ -12,6 +12,12 @@ from .constants import SUPPORTED_INPUT_SUFFIXES
 from .layout import process_page, apply_dates, printed_totals
 from .reconciliation import reconcile
 
+def _row_date_key(row: ExtractedRow, year: int | None) -> tuple[int, int, int, int]:
+    if row.date_parts is None:
+        return (1, 0, 0, 0)
+    day, month, row_year = row.date_parts
+    return (0, row_year or year or 0, month, day)
+
 def extract_statement(pdf_path: str | Path, dpi: int = 220) -> dict[str, Any]:
     input_path = Path(pdf_path)
     if input_path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
@@ -38,6 +44,7 @@ def extract_statement(pdf_path: str | Path, dpi: int = 220) -> dict[str, Any]:
     year = Counter(explicit).most_common(1)[0][0] if explicit else None
 
     apply_dates(rows, year)
+    rows.sort(key=lambda row: _row_date_key(row, year))
     printed = {**printed_totals(full_text), **state.printed}
     has_opening_row = any(r.is_opening for r in rows)
     info = reconcile(rows, None if has_opening_row else printed.get("opening"))

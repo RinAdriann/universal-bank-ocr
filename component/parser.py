@@ -103,6 +103,15 @@ def _hint_direction(description: str) -> str | None:
     debit, credit = bool(DEBIT_HINT_RE.search(text)), bool(CREDIT_HINT_RE.search(text))
     return "debit" if debit and not credit else "credit" if credit and not debit else None
 
+def _explicit_direction(text: str) -> str | None:
+    """Return direction only from an explicit CR/CREDIT or DB/DEBIT marker."""
+    tokens = re.findall(r"[A-Z]+", text.upper())
+    if any(token in {"CR", "CREDIT"} for token in tokens):
+        return "credit"
+    if any(token in {"DB", "DEBIT"} for token in tokens):
+        return "debit"
+    return None
+
 def _description_direction(description: str) -> str | None:
     text = description.upper()
     if re.search(r"\b(KR|CR|KREDIT|CREDIT)\b", text):

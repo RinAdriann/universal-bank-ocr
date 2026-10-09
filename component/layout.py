@@ -9,7 +9,7 @@ from datetime import date
 
 from .models import Word, Cell, Line, Layout, ExtractedRow, State
 from .constants import ROLE_KEYS, NUMERIC_ROLES, _ALL_ROLE_WORDS, MONTHS, OPENING_RE, STOP_RE, _PURE_TIME_RE
-from .parser import _clean_text, _is_money, _is_int_amount, parse_amount, _match_date, _norm_money, _description_direction, _line_direction
+from .parser import _clean_text, _is_money, _is_int_amount, parse_amount, _match_date, _norm_money, _description_direction, _explicit_direction, _line_direction
 
 def _median_height(words: Sequence[Word]) -> float:
     heights = [w.h for w in words if len(w.text) >= 2] or [w.h for w in words]
@@ -336,11 +336,14 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
         nonlocal cur
         if cur is None:
             return
-        cur.description = _clean_text(" ".join(desc_parts))
-        cur.reference = _clean_text(" ".join(ref_parts))
-        cur.extra = _clean_text(" ".join(extra_parts))
-        cur.raw_text = _clean_text(" ".join(raw_parts))
+        cur.description = _clean_text(" ".join(desc_parts)).upper()
+        cur.reference = _clean_text(" ".join(ref_parts)).upper()
+        cur.extra = _clean_text(" ".join(extra_parts)).upper()
+        cur.raw_text = _clean_text(" ".join(raw_parts)).upper()
+        explicit_direction = _explicit_direction(cur.raw_text)
         narrative_direction = _description_direction(cur.description)
+        if explicit_direction:
+            narrative_direction = explicit_direction
         if cur.pending_mutasi is not None and narrative_direction:
             if cur.pending_dir and cur.pending_dir != narrative_direction:
                 cur.validation.append("direction_corrected")
@@ -398,7 +401,13 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
                 if bal:
                     amt = parse_amount(bal[-1].text)
                     if amt:
-                        rows.append(ExtractedRow(page=page_no, raw_text=_clean_text(text), description=_clean_text(" ".join(c.text for c in line.cells if not c.money)) or "SALDO AWAL", balance=amt.value, is_opening=True))
+                        rows.append(ExtractedRow(
+                            page=page_no,
+                            raw_text=_clean_text(text).upper(),
+                            description=(_clean_text(" ".join(c.text for c in line.cells if not c.money)) or "SALDO AWAL").upper(),
+                            balance=amt.value,
+                            is_opening=True,
+                        ))
                 continue
             if cur is None or closed:
                 continue

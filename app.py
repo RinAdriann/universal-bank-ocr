@@ -90,9 +90,9 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
 
         summary = result.get("summary", {})
         if summary.get("chain_reconciles") is True:
-            st.info("Balance check passed: opening + credits - debits = closing balance.")
+            st.info("Balance check passed.")
         elif summary.get("chain_reconciles") is False:
-            st.warning("Balance check failed: opening + credits - debits does not equal the closing balance. Review flagged rows.")
+            st.warning("Balance check failed. Review flagged rows.")
         if summary.get("printed_totals_match") is False:
             st.warning("Extracted totals differ from the totals printed on the statement.")
 
