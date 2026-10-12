@@ -1,5 +1,3 @@
-"""Data structures for bank statement extraction."""
-
 from dataclasses import dataclass, field
 from datetime import date
 

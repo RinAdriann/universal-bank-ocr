@@ -1,4 +1,3 @@
-"""Layout learning and row assembly logic."""
 import math
 import statistics
 import itertools
@@ -7,7 +6,7 @@ from difflib import get_close_matches
 from typing import Sequence, Any
 from datetime import date
 
-from .models import Word, Cell, Line, Layout, ExtractedRow, State
+from .structures import Word, Cell, Line, Layout, ExtractedRow, State
 from .constants import ROLE_KEYS, NUMERIC_ROLES, _ALL_ROLE_WORDS, MONTHS, OPENING_RE, STOP_RE, _PURE_TIME_RE
 from .parser import _clean_text, _is_money, _is_int_amount, parse_amount, _match_date, _norm_money, _description_direction, _explicit_direction, _line_direction
 
