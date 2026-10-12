@@ -1,9 +1,7 @@
-"""Parsing routines for text, numbers, dates and basic direction hints."""
-
 import re
 from typing import Sequence
 from .constants import _DATE_PATTERNS, _TIME_RE, MONTHS, DEBIT_HINT_RE, CREDIT_HINT_RE
-from .models import Amount, Cell
+from .structures import Amount, Cell
 
 def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value).replace(" ", " ")).strip()
@@ -89,22 +87,14 @@ def _match_date(text: str) -> tuple[tuple[int, int, int | None], int] | None:
     return None
 
 def _hint_direction(description: str) -> str | None:
-    """Return cash-flow direction from narrative text, not a column name.
-
-    ``CR`` means incoming money in BCA narratives. It is deliberately mapped
-    to the internal credit side only after the parser has identified the
-    amount column; it must never decide which numeric column is saldo.
-    """
     text = description.upper()
-    # BCA uses KR/CR as an incoming marker. Check these first because a row
-    # can also contain generic words such as TRSF or TRANSAKSI.
+
     if re.search(r"\b(?:KR|CR)\b", text):
         return "credit"
     debit, credit = bool(DEBIT_HINT_RE.search(text)), bool(CREDIT_HINT_RE.search(text))
     return "debit" if debit and not credit else "credit" if credit and not debit else None
 
 def _explicit_direction(text: str) -> str | None:
-    """Return direction only from an explicit CR/CREDIT or DB/DEBIT marker."""
     tokens = re.findall(r"[A-Z]+", text.upper())
     if any(token in {"CR", "CREDIT"} for token in tokens):
         return "credit"

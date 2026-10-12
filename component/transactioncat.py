@@ -1,5 +1,3 @@
-"""Transaction categorization API."""
-
 from .constants import _CATEGORY_RES
 
 def category(description: str, debit: float | None, credit: float | None) -> str:

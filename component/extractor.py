@@ -1,16 +1,14 @@
-"""Main extractor."""
-
 import argparse
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .models import State, ExtractedRow
-from .vision import iter_pages
+from .structures import State, ExtractedRow
+from .ocr import iter_pages
 from .constants import SUPPORTED_INPUT_SUFFIXES
 from .layout import process_page, apply_dates, printed_totals
-from .reconciliation import reconcile
+from .balancecalc import reconcile
 
 def _row_date_key(row: ExtractedRow, year: int | None) -> tuple[int, int, int, int]:
     if row.date_parts is None:
@@ -27,7 +25,7 @@ def extract_statement(pdf_path: str | Path, dpi: int = 220) -> dict[str, Any]:
     pages: list[dict] = []
     all_text: list[str] = []
     state = State()
-
+    
     for number, words, page_w, source in iter_pages(input_path, dpi):
         page_rows, diag, page_text = process_page(words, page_w, number, state)
         diag["source"] = source
@@ -63,8 +61,8 @@ def extract_statement(pdf_path: str | Path, dpi: int = 220) -> dict[str, Any]:
         "opening_balance": opening, "closing_balance": closing,
         "total_debit": total_debit, "total_credit": total_credit,
         "rows_flagged": sum(bool(r.validation) for r in rows),
-        "chain_reconciles": (abs(opening + total_credit - total_debit - closing) < 1.0
-                             if opening is not None and closing is not None else None),
+        "chain_reconciles": (abs(opening + total_credit - total_debit - closing) < 1.0 
+                            if opening is not None and closing is not None else None),
     }
     if printed:
         summary["printed_totals"] = printed

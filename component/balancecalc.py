@@ -1,7 +1,5 @@
-"""Balance reconciliation logic."""
-
 from typing import Any
-from .models import ExtractedRow
+from .structures import ExtractedRow
 from .constants import OPENING_RE, _TOL
 from .parser import _explicit_direction, _hint_direction
 
@@ -117,9 +115,6 @@ def reconcile(rows: list[ExtractedRow], opening_hint: float | None = None) -> di
             and not row.pending_mutasi
             and prev is not None
         ):
-            # A sparse BCA row can expose only the transaction amount while
-            # the learned layout labels it as Saldo. Keep that value as the
-            # running balance and recover the transaction from its delta.
             delta = row.balance - prev
             if abs(delta) >= _TOL:
                 if narrative_hint == "credit" and delta > 0:
@@ -167,8 +162,8 @@ def reconcile(rows: list[ExtractedRow], opening_hint: float | None = None) -> di
             prev = row.balance
 
     penalties = {"balance_mismatch": 0.5, "amount_derived": 0.35, "saldo_calculated": 0.2, "direction_guessed": 0.3,
-                 "direction_corrected": 0.05, "date_invalid": 0.3, "multiple_amounts": 0.3, "multiple_balances": 0.3,
-                 "pending_transaction": 0.1}
+                "direction_corrected": 0.05, "date_invalid": 0.3, "multiple_amounts": 0.3, "multiple_balances": 0.3,
+                "pending_transaction": 0.1}
     for r in rows:
         r.confidence = max(0.0, 1.0 - sum(penalties.get(v, 0.2) for v in r.validation))
     if opening_hint is not None and not openings:

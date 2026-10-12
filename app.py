@@ -96,7 +96,6 @@ if uploaded_file is not None and st.button("Extract", type="primary"):
         if summary.get("printed_totals_match") is False:
             st.warning("Extracted totals differ from the totals printed on the statement.")
 
-        # Render the dataframe in the UI
         st.dataframe(dataframe, use_container_width=True, hide_index=True)
 
         with st.expander("Review information"):

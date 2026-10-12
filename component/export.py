@@ -1,11 +1,9 @@
-"""Output/export API."""
-
 import io
 from datetime import date, datetime
 import pandas as pd
 from typing import Any
-from .categories import category
-from .categories import flow
+from .transactioncat import category
+from .transactioncat import flow
 
 
 def _transaction_record(row: Any) -> dict[str, Any]:
@@ -43,10 +41,9 @@ def excel_bytes(result: dict[str, Any]) -> bytes:
         ).to_excel(writer, sheet_name="Out", index=False)
 
         pd.DataFrame([{
-            "Halaman": row.page, "Confidence": round(row.confidence, 3),
-            "Human review status": "Needs review" if row.validation else "Pending review",
-            "Validation flags": ", ".join(row.validation), "Referensi": row.reference,
-            "Full detected text": row.raw_text,
+            "Halaman": row.page,
+            "Validation flags": ", ".join(row.validation),
+            "Full detected text": row.raw_text
         } for row in result["rows"]]).to_excel(writer, sheet_name="Review", index=False)
 
         for name in writer.sheets:

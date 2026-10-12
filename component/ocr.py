@@ -1,9 +1,7 @@
-"""PDF text extraction and OCR."""
-
 from pathlib import Path
 from typing import Any, Iterator
 import numpy as np
-from .models import Word
+from .structures import Word
 from .constants import IMAGE_SUFFIXES
 from .parser import _clean_text
 
@@ -35,7 +33,7 @@ def _words_pymupdf(page: Any) -> list[Word]:
             def flush() -> None:
                 if cur:
                     words.append(Word("".join(c[0] for c in cur), min(c[1] for c in cur),
-                                      min(c[2] for c in cur), max(c[3] for c in cur), max(c[4] for c in cur)))
+                                    min(c[2] for c in cur), max(c[3] for c in cur), max(c[4] for c in cur)))
                     cur.clear()
 
             for span in line.get("spans", []):

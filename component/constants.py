@@ -1,5 +1,3 @@
-"""Constants and regular expressions."""
-
 import re
 
 _TOL = 0.51
