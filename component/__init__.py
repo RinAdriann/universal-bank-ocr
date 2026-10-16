@@ -1,5 +1,5 @@
 from .transactioncat import category, flow
-from .extractor import extract_statement
+from .extractor import extract_statement, extract_statements
 from .export import excel_bytes
 
-__all__ = ["category", "excel_bytes", "extract_statement", "flow"]
+__all__ = ["category", "excel_bytes", "extract_statement", "extract_statements", "flow"]

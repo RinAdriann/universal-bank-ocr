@@ -17,5 +17,5 @@ All notable changes to this project will be documented in this file.
 - Edit README.md
 - Modularization of all functions from initially just parser. Adjusted based on possible templates, but it was educated guess for future templates. Future work: Test and adjust for more templates, Support for multiple documents handling at once, Adjust based on CA needs.
 - Testing out table finder from Fitz and adjusting parser.py (still work in progress)
-- removed redundant file
+- Removed redundant files
 - Initial commit

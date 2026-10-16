@@ -1,17 +1,16 @@
 import re
 from typing import Sequence
-from .constants import _DATE_PATTERNS, _TIME_RE, MONTHS, DEBIT_HINT_RE, CREDIT_HINT_RE
+from .constants import (
+    _WEEKDAY_RE, _GLUED_TIME_RE, _ALPHA_DATE_RE, _NUM_DATE_RE, _TIME_RE, _PURE_TIME_RE,
+    MONTHS, DEBIT_HINT_RE, CREDIT_HINT_RE, _MONEY_RE, _INT_RE, ACCOUNT_RE, _BANK_RES,
+)
 from .structures import Amount, Cell
 
 def _clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value).replace(" ", " ")).strip()
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 def _norm_money(text: str) -> str:
-    s = re.sub(r"\s+", "", str(text).upper())
-    return s.replace("RP.", "").replace("RP", "").replace("IDR", "")
-
-_MONEY_RE = re.compile(r"^[+\-]?\(?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{1,2})\)?(?:DB|DR|CR|D|K|C|[+\-])?$")
-_INT_RE = re.compile(r"^[+\-]?\d{1,13}(?:DB|DR|CR|D|K|C)?$")
+    return re.sub(r"\s+", "", str(text).upper()).replace("RP.", "").replace("RP", "").replace("IDR", "")
 
 def _is_money(text: str) -> bool:
     return bool(_MONEY_RE.match(_norm_money(text)))
@@ -19,30 +18,57 @@ def _is_money(text: str) -> bool:
 def _is_int_amount(text: str) -> bool:
     return bool(_INT_RE.match(_norm_money(text)))
 
+def detect_account(text: str) -> str | None:
+    for m in ACCOUNT_RE.finditer(text or ""):
+        digits = re.sub(r"\D", "", m.group(1))
+        if 5 <= len(digits) <= 20:
+            return digits
+    return None
+
+def detect_bank(text: str) -> str | None:
+    if not text:
+        return None
+    for name, pat in _BANK_RES:
+        if pat.search(text):
+            return name
+    return None
+
+def parse_time(text: str) -> tuple[int, int, int] | None:
+    m = _PURE_TIME_RE.match(text.strip()) or _TIME_RE.match(text)
+    if not m:
+        return None
+    groups = m.groups()
+    if len(groups) == 5 and groups[4] is not None:
+        return (int(groups[4]), 0, 0)
+    if groups[0] is None:
+        return None
+    h, mi, s, ampm = int(groups[0]), int(groups[1] or 0), int(groups[2] or 0), (groups[3] or "").upper()
+    if ampm == "PM" and h < 12:
+        h += 12
+    elif ampm == "AM" and h == 12:
+        h = 0
+    return (h, mi, s)
+
 def parse_amount(text: str) -> Amount | None:
     if not text:
         return None
-    s = _norm_money(text).strip(".,;:")
-    s = re.sub(r"(?<=\d)\s+(?=[\d.,])", "", s)
+    s = re.sub(r"(?<=\d)\s+(?=[\d.,])", "", _norm_money(text).strip(".,;:"))
     m = re.fullmatch(r"([+\-]?)(\()?(\d[\d.,]*)(\))?(DB|DR|CR|D|K|C|[+\-])?", s)
     if not m:
         return None
     sign, lparen, num, _rparen, suffix = m.groups()
-    if re.search(r"[.,]$", num):
-        num = num[:-1]
+    num = num.rstrip(".,")
     has_dot, has_comma = "." in num, "," in num
     if has_dot and has_comma:
         decimal = "," if num.rfind(",") > num.rfind(".") else "."
-        thousands = "." if decimal == "," else ","
-        num = num.replace(thousands, "").replace(decimal, ".")
+        num = num.replace("." if decimal == "," else ",", "")
+        parts = num.split(decimal)
+        num = ("".join(parts[:-1]) + "." + parts[-1]) if len(parts[-1]) <= 2 else "".join(parts)
     elif has_dot or has_comma:
         sep = "." if has_dot else ","
         parts = num.split(sep)
         if len(parts) > 2:
-            if len(parts[-1]) <= 2:
-                num = "".join(parts[:-1]) + "." + parts[-1]
-            else:
-                num = num.replace(sep, "")
+            num = ("".join(parts[:-1]) + "." + parts[-1]) if len(parts[-1]) <= 2 else num.replace(sep, "")
         elif len(parts[-1]) == 3 and parts[0] not in ("0", "00") and len(parts[0]) <= 3:
             num = num.replace(sep, "")
         else:
@@ -51,44 +77,78 @@ def parse_amount(text: str) -> Amount | None:
         value = float(num)
     except ValueError:
         return None
-    direction = None
-    if sign == "-" or lparen or suffix in ("DB", "DR", "D", "-"):
-        direction = "debit"
-    elif sign == "+" or suffix in ("CR", "C", "K", "+"):
-        direction = "credit"
+    direction = (
+        "debit" if (sign == "-" or lparen or suffix in ("DB", "DR", "D", "-"))
+        else "credit" if (sign == "+" or suffix in ("CR", "C", "K", "+"))
+        else None
+    )
     return Amount(value, direction)
 
-def _match_date(text: str) -> tuple[tuple[int, int, int | None], int] | None:
-    text = text.strip()
-    for kind, pattern in _DATE_PATTERNS:
-        m = pattern.match(text)
-        if not m:
-            continue
-        if kind == "num":
-            d, sep, mo, y = m.groups()
-            if y is None and sep == ".":
-                continue
-            day, month, year = int(d), int(mo), (int(y) if y else None)
-        elif kind == "mon":
-            d, mon, y = m.groups()
-            day, month, year = int(d), MONTHS[mon.lower()], (int(y) if y else None)
+def _norm_year(y: int | None) -> int | None:
+    if y is None:
+        return None
+    if y < 100:
+        return (1900 + y) if y >= 70 else (2000 + y)
+    return y if 1900 <= y <= 2100 else None
+
+def _match_date(text: str) -> tuple[tuple, int] | None:
+    raw = text.strip()
+    lead = len(text) - len(text.lstrip())
+    wk = _WEEKDAY_RE.match(raw)
+    wk_len = wk.end() if wk else 0
+    sub = raw[wk_len:]
+
+    split_at: int | None = None
+    if gm := _GLUED_TIME_RE.match(sub):
+        tail = sub[gm.end(1):]
+        if re.match(r"^(?:[01]?\d|2[0-3]):[0-5]\d", tail) or (gm.group(2) is not None and len(gm.group(2)) == 2 and not sub[gm.start(2):gm.end(1) + 2].startswith(("19", "20")) and re.match(r"^(?:[01]\d|2[0-3])\b", tail)):
+            split_at = gm.end(1)
+            sub = sub[:split_at] + " " + sub[split_at:]
+
+    parts: tuple | None = None
+    end = 0
+    if am := _ALPHA_DATE_RE.match(sub):
+        n_pre, mon1, n_post, mon2, m_n1, m_n2 = am.groups()
+        mon_s = mon1 or mon2
+        nums = [int(x) for x in (n_pre, n_post, m_n1, m_n2) if x is not None]
+        month = MONTHS[mon_s.lower()]
+        if len(nums) == 1 and 1 <= nums[0] <= 31:
+            parts, end = (nums[0], month, None), am.end()
+        elif len(nums) == 2:
+            n0, n1 = nums
+            if n0 >= 100 or n0 > 31 or n0 == 0:
+                day, yr = n1, _norm_year(n0)
+            else:
+                day, yr = n0, _norm_year(n1)
+            if 1 <= day <= 31 and yr is not None:
+                parts, end = (day, month, yr), am.end()
+    elif nm := _NUM_DATE_RE.match(sub):
+        s1, sep, s2, s3 = nm.groups()
+        if s3 is None:
+            if sep != ".":
+                a, b = int(s1), int(s2)
+                if 1 <= a <= 31 and 1 <= b <= 31 and min(a, b) <= 12:
+                    parts, end = (a, b, None, True), nm.end()
         else:
-            y, _sep, mo, d = m.groups()
-            day, month, year = int(d), int(mo), int(y)
-        if year is not None and year < 100:
-            year += 2000
-        if not (1 <= day <= 31 and 1 <= month <= 12):
-            continue
-        end = m.end()
-        t = _TIME_RE.match(text[end:])
-        if t:
-            end += t.end()
-        return (day, month, year), end
-    return None
+            a, b, c = int(s1), int(s2), int(s3)
+            if len(s1) == 4 or a > 31 or a == 0:
+                yr, x, y, iso = _norm_year(a), b, c, True
+            else:
+                yr, x, y, iso = _norm_year(c), a, b, False
+            if yr is not None and 1 <= x <= 31 and 1 <= y <= 31 and min(x, y) <= 12:
+                parts = ((y, x, yr) if x <= 12 else (x, y, yr)) if iso else (x, y, yr, True)
+                end = nm.end()
+
+    if parts is None:
+        return None
+    if tm := _TIME_RE.match(sub[end:]):
+        end += tm.end()
+    if split_at is not None and end > split_at:
+        end -= 1
+    return parts, lead + wk_len + end
 
 def _hint_direction(description: str) -> str | None:
     text = description.upper()
-
     if re.search(r"\b(?:KR|CR)\b", text):
         return "credit"
     debit, credit = bool(DEBIT_HINT_RE.search(text)), bool(CREDIT_HINT_RE.search(text))
@@ -120,11 +180,8 @@ def _marker_direction(text: str) -> str | None:
 
 def _line_direction(cells: Sequence[Cell]) -> str | None:
     for cell in cells:
-        if cell.money:
-            amount = parse_amount(cell.text)
-            if amount and amount.direction:
-                return amount.direction
-        direction = _marker_direction(cell.text)
-        if direction:
+        if cell.money and (amount := parse_amount(cell.text)) and amount.direction:
+            return amount.direction
+        if direction := _marker_direction(cell.text):
             return direction
     return None

@@ -18,6 +18,9 @@ class ExtractedRow:
     extra: str = ""
     confidence: float = 1.0
     pending_dir: str | None = field(default=None, repr=False)
+    account: str = ""
+    bank: str = ""
+    time: tuple[int, int, int] | None = field(default=None, repr=False)
 
 @dataclass(frozen=True)
 class Amount:
@@ -31,18 +34,14 @@ class Word:
     y0: float
     x1: float
     y1: float
+    xc: float = field(init=False)
+    yc: float = field(init=False)
+    h: float = field(init=False)
 
-    @property
-    def xc(self) -> float:
-        return (self.x0 + self.x1) / 2
-
-    @property
-    def yc(self) -> float:
-        return (self.y0 + self.y1) / 2
-
-    @property
-    def h(self) -> float:
-        return max(self.y1 - self.y0, 1e-6)
+    def __post_init__(self) -> None:
+        self.xc = (self.x0 + self.x1) / 2
+        self.yc = (self.y0 + self.y1) / 2
+        self.h = max(self.y1 - self.y0, 1e-6)
 
 @dataclass
 class Cell:
@@ -81,3 +80,5 @@ class State:
     layout: Layout | None = None
     has_rows: bool = False
     printed: dict[str, float] = field(default_factory=dict)
+    account: str = ""
+    bank: str = ""
