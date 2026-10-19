@@ -1,10 +1,10 @@
-from .constants import _CATEGORY_RES
+from .constants import CATEGORY_RES
 
 def category(description: str, debit: float | None, credit: float | None) -> str:
     if not description:
         return "Uncategorized"
     upper = description.upper()
-    for name, pattern in _CATEGORY_RES:
+    for name, pattern in CATEGORY_RES:
         if pattern.search(upper):
             return name
     return "Transfer Out / Debit" if (debit or 0) > 0 else "Transfer In / Credit" if (credit or 0) > 0 else "Uncategorized"

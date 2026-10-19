@@ -1,60 +1,87 @@
-# Universal Indonesian Bank Statement OCR
+# Indonesian Bank Statement OCR
 
-This project uses a local hybrid pipeline:
+Snapshot dokumentasi: 2026-10-19 (v0.2 — Python/Streamlit & RapidOCR)
 
-- Digital PDF pages use PyMuPDF word coordinates without OCR.
-- Each page uses a conservative quality gate: usable text layers stay on the
-  fast PyMuPDF path, while incomplete/mixed pages fall back to RapidOCR.
-- Scanned pages are rendered and recognized with one RapidOCR CPU engine.
-- Rows and cells are inferred from adaptive coordinates rather than bank-specific templates.
+Indonesian Bank Statement OCR adalah layanan ekstraksi lokal untuk membaca, merekonsiliasi, dan mengekspor mutasi rekening koran (PDF digital, hasil scan, maupun gambar) dari berbagai bank di Indonesia menjadi laporan **Excel (`.xlsx`)** dan **JSON** secara otomatis.
 
-## Run locally
+> **Update v0.2:** mendukung upload **multi-dokumen** sekaligus dengan pengelompokan otomatis berdasarkan **nama bank & nomor rekening**, deteksi header/logo pada 30% area atas halaman pertama, analitik bulanan (**Saldo Mengendap** & **Top 5 CR/DB**), serta pemrosesan lokal menggunakan direktori sementara terisolasi demi menjaga privasi data. Riwayat perubahan terdokumentasi di `CHANGELOG.md`.
 
-```bash
+## Arsitektur
+
+```text
+app.py (Streamlit Web UI)
+  -> upload multi-file PDF/gambar, preview tabel & analitik, export Excel/JSON
+
+component/ (Core Extraction Engine)
+  __init__.py         -> public API (extract_statement, extract_statements, excel_bytes, category, flow)
+  ocr.py              -> ekstraksi teks PyMuPDF/pdfplumber + fallback RapidOCR, deskew, & header/logo OCR (top 30%)
+  layout.py           -> rekonstruksi baris/kolom adaptif berbasis koordinat, deteksi header & tanggal
+  parser.py           -> parsing nominal uang, tanggal/waktu, nomor rekening, nama bank, & arah mutasi
+  balancecalc.py      -> rekonsiliasi rantai saldo (opening/closing), koreksi arah DB/CR, & skor confidence
+  transactioncat.py   -> kategorisasi transaksi otomatis & klasifikasi arus kas (flow)
+  export.py           -> serialisasi multi-sheet Excel (Detail, In, Out, Saldo Mengendap, Top 5, Review)
+  structures.py       -> dataclass model internal (Word, Cell, Line, Layout, ExtractedRow, Amount, State)
+  constants.py        -> kamus regex tanggal, pola bank Indonesia, nomor rekening, & aturan kategori
+```
+
+## Tech Stack
+
+- **Runtime & UI:** Python 3.12+ + Streamlit
+- **PDF & Text Layer:** `PyMuPDF` (`fitz`), `pdfplumber`, `pypdfium2`
+- **OCR & Image Processing:** `rapidocr-onnxruntime` (CPU ONNX) + `opencv-python-headless` + `numpy`
+- **Data & Export:** `pandas` + `openpyxl`
+- **Deployment:** Docker (`python:3.12-slim`)
+
+## Fitur & Output Utama
+
+- `extract_statement(paths, dpi=220)` — ekstraksi satu atau banyak file PDF/gambar sekaligus, dikelompokkan per `(bank, account)`.
+- `excel_bytes(result)` — menghasilkan file `.xlsx` dengan 6 sheet per rekening:
+  - `Detail <Bank - Rekening>` — seluruh transaksi (`Tanggal`, `Kredit`, `Debit`, `Saldo`, `Deskripsi`, `Kategori Transaksi`)
+  - `In <Bank - Rekening>` — khusus transaksi uang masuk (`Kredit`)
+  - `Out <Bank - Rekening>` — khusus transaksi uang keluar (`Debit`)
+  - `Saldo Mengendap <Bank - Rekening>` — saldo akhir harian per bulan
+  - `Top 5 <Bank - Rekening>` — 5 transaksi Kredit & Debit terbesar per bulan
+  - `Review <Bank - Rekening>` — halaman, *validation flags*, dan teks mentah hasil deteksi
+- `saldo_mengendap(rows)` & `top5_monthly(rows)` — fungsi analitik bulanan yang dipakai bersama oleh UI dan eksportir Excel.
+
+## Menjalankan
+
+### A. Lokal (Python / Streamlit)
+
+```powershell
 python -m pip install -r requirements.txt
-streamlit run pdfplumber_app.py
+streamlit run app.py
 ```
 
-For a headless/CLI run:
+Lalu buka: `http://localhost:8501/`
 
-```bash
-python parser.py statement.pdf --output output
+### B. Docker (disarankan untuk deployment)
+
+```powershell
+docker build -t bank-ocr .
+docker run -p 8501:8501 bank-ocr
 ```
 
-The CLI writes `transactions.xlsx` and coordinate-aware `transactions.json`.
+Lalu buka: `http://localhost:8501/`
 
-To try optional PaddleOCR table structure recognition:
+### C. CLI (Headless)
 
-```bash
-python -m pip install -r requirements-table.txt
-python parser.py statement.pdf --output output --table-model
+```powershell
+python -m component.extractor statement1.pdf statement2.pdf --output output
 ```
 
-The Streamlit app has the same opt-in checkbox. PaddleOCR table mode is slower
-and is not part of the default path; if it returns no usable transaction rows,
-the coordinate extractor is used automatically.
+Hasil ekstraksi akan disimpan ke `output/results.xlsx` beserta ringkasan rekonsiliasi di terminal.
 
-The Excel workbook follows the cleaned statement layout:
+## Struktur File & Dokumentasi
 
-The first sheet contains `date, credit, debit, balance, description and category`.
+- `app.py` — antarmuka web Streamlit, indikator waktu proses *real-time*, preview per rekening, dan tombol unduh Excel/JSON.
+- `component/` — modul inti ekstraksi, OCR, parser, rekonsiliasi saldo, kategorisasi, dan pembuatan Excel.
+- `CHANGELOG.md` — catatan riwayat perubahan dan rencana pengembangan berikutnya.
+- `Dockerfile` & `requirements.txt` — konfigurasi *container* dan daftar dependensi Python.
 
-The second sheet contains `transaction in`.
+## Catatan Penting
 
-The third sheet contains `transaction out`
-
-The fourth sheet contains contains the page number and full detected text for each extracted row.
-
-## Package layout
-
-The implementation is organized behind the `component` package boundary:
-
-- `ocr.py` contains the OCR part, extract everything from pdf
-- `extractor.py` 
-- `reconciliation.py` exposes balance reconciliation independently
-  from file and UI concerns.
-- `categories.py` contains transaction categorization.
-- `export.py` contains Excel serialization.
-- `parser.py` remains a small compatibility/CLI facade for existing commands.
-
-New application code should import `extract_statement`, `excel_bytes`, and
-`category` from `component` rather than importing parser internals.
+- **Hybrid Pipeline:** halaman PDF digital langsung diekstrak melalui koordinat kata `PyMuPDF` tanpa OCR; halaman scan atau gambar otomatis dialihkan ke `RapidOCR` dengan *preprocessing* dan *deskew*.
+- **Deteksi Bank & Rekening (Top 30% Header):** sistem memeriksa teks digital dan melakukan OCR pada 30% bagian atas halaman pertama untuk mengenali nama/logo bank serta nomor rekening secara akurat.
+- **Rekonsiliasi Otomatis:** urutan transaksi (*oldest-first* vs *newest-first*), kolom mutasi tunggal, maupun posisi Debit/Kredit yang tertukar dikoreksi otomatis berdasarkan selisih rantai saldo (`chain_reconciles`).
+- **Privasi & Keamanan Data:** seluruh proses berjalan 100% lokal tanpa panggilan API eksternal, file upload dibersihkan otomatis melalui `TemporaryDirectory`, dan sel teks di Excel dilindungi dari *formula injection*.

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2] - 2026-10-16
+
+### Added
+- Added date template for when PDF or OCR failed and merged date with time. 
+- Added features for 'Saldo Mengendap' and 'Top 5 CR/DB'. 
+- Added support for multi documents. 
+- Added changelog from precious commit messages, tried to fix date parsing and detection but not finished. Need to fix soon. Other than that, just need more template to test.
+
+### Changed
+- Data is grouped by account number.
+
+### Next
+- Test and adjust for more templates 
+- Adjust based on CA needs.
+
 ## [0.1] - 2026-10-12
 
 ### Added
@@ -15,7 +30,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Edit README.md
-- Modularization of all functions from initially just parser. Adjusted based on possible templates, but it was educated guess for future templates. Future work: Test and adjust for more templates, Support for multiple documents handling at once, Adjust based on CA needs.
+- Modularization of all functions from initially just parser. 
+- Adjusted based on possible templates, but it was educated guess for future templates. 
 - Testing out table finder from Fitz and adjusting parser.py (still work in progress)
-- Removed redundant files
-- Initial commit
+

@@ -1,6 +1,6 @@
 import re
 
-_TOL = 0.51
+TOL = 0.51
 MONTHS = {
     "jan": 1, "januari": 1, "january": 1, "feb": 2, "pebruari": 2, "februari": 2, "february": 2,
     "mar": 3, "maret": 3, "march": 3, "apr": 4, "april": 4, "mei": 5, "may": 5,
@@ -13,33 +13,38 @@ MONTH_NAMES_ID = {
     1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
     7: "Juli", 8: "Agustus", 9: "September", 10: "Oktober", 11: "November", 12: "Desember",
 }
-_MONTH_ALT = "|".join(sorted(MONTHS, key=len, reverse=True))
-_WEEKDAY_RE = re.compile(
+MONTH_ALT = "|".join(sorted(MONTHS, key=len, reverse=True))
+WEEKDAY_RE = re.compile(
     r"^(?:sen(?:in)?|sel(?:asa)?|rab(?:u)?|kam(?:is)?|jum(?:'?at)?|sab(?:tu)?|min(?:ggu)?|"
     r"mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)[,.\s]+",
     re.IGNORECASE,
 )
-_GLUED_TIME_RE = re.compile(
+GLUED_TIME_RE = re.compile(
     r"^(\d{1,4}[/\-.\s]*(?:\d{1,2}|[A-Za-z]{3,9})\.?[/\-.\s,]*((?:19|20)\d{2}|\d{2})?|[A-Za-z]{3,9}\.?[\s/\-.,]*\d{1,2}(?:[\s/\-.,]+(?:(?:19|20)\d{2}|\d{2}))?)"
     r"([01]\d|2[0-3]|\d)(?=:[0-5]\d|\b)"
 )
-_TIME_RE = re.compile(
+TIME_RE = re.compile(
     r"^(?:\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?:[:.]([0-5]\d))?(?:\s*(AM|PM|WIB|WITA|WIT))?|\s+([01]\d|2[0-3])(?=\s*$))\b",
     re.IGNORECASE,
 )
-_PURE_TIME_RE = re.compile(r"^([01]?\d|2[0-3])[:.]([0-5]\d)(?:[:.]([0-5]\d))?(?:\s*(AM|PM|WIB|WITA|WIT))?$", re.IGNORECASE)
-_ALPHA_DATE_RE = re.compile(
-    rf"^(?:(\d{{1,4}})[\s/\-.,]*({_MONTH_ALT})(?![A-Za-z])\.?(?:[\s/\-.,]*(\d{{1,4}}(?![\d:.])))?|"
-    rf"({_MONTH_ALT})(?![A-Za-z])\.?[\s/\-.,]*(\d{{1,4}}(?![\d:.]))(?:[\s/\-.,]+(\d{{1,4}}(?![\d:.])))?)(?![\d,])",
+PURE_TIME_RE = re.compile(r"^([01]?\d|2[0-3])[:.]([0-5]\d)(?:[:.]([0-5]\d))?(?:\s*(AM|PM|WIB|WITA|WIT))?$", re.IGNORECASE)
+ALPHA_DATE_RE = re.compile(
+    rf"^(?:(\d{{1,4}})[\s/\-.,]*({MONTH_ALT})(?![A-Za-z])\.?(?:[\s/\-.,]*(\d{{1,4}}(?![\d:.])))?|"
+    rf"({MONTH_ALT})(?![A-Za-z])\.?[\s/\-.,]*(\d{{1,4}}(?![\d:.]))(?:[\s/\-.,]+(\d{{1,4}}(?![\d:.])))?)(?![\d,])",
     re.IGNORECASE,
 )
-_NUM_DATE_RE = re.compile(r"^(\d{1,4})([/\-.])(\d{1,2})(?:\2(\d{1,4}))?(?![\d,])")
+NUM_DATE_RE = re.compile(r"^(\d{1,4})([/\-.])(\d{1,2})(?:\2(\d{1,4}))?(?![\d,])")
 
 ACCOUNT_RE = re.compile(
-    r"(?:NO(?:MOR|\.)?\s*(?:REK(?:ENING|\.)?|ACC(?:OUNT|\.)?)|REK(?:ENING|\.)?\s*(?:NO(?:MOR|\.)?|GIRO|TABUNGAN)|"
-    r"ACC(?:OUNT|\.)?\s*(?:NO(?:MOR|\.)?|NUMBER|#)|A/C\s*(?:NO|NUMBER)?)"
-    r"(?:\s*/\s*(?:ACCOUNT\s*(?:NUMBER|NO)|NO\.?\s*REK(?:ENING)?))?"
-    r"[\s:.\-]*(?:(?:IDR|USD|SGD|EUR|RP)\s*)?(\d+(?:[\-.]\d+|\s+\d+(?![/\-.\d:]))*)",
+    r"(?:NO(?:MOR|\.)?\s*(?:REK(?:ENING|\.)?|ACC(?:OUNT|\.)?|AC\b)|"
+    r"REK(?:ENING|\.)?(?:\s*(?:NO(?:MOR|\.)?|GIRO|TABUNGAN|KORAN|SIMPANAN|TAHAPAN|BRITAMA|SIMPEDES|TAPLUS))?|"
+    r"ACC(?:OUNT|\.)?\s*(?:NO(?:MOR|\.)?|NUMBER|#)?|"
+    r"A\s*/\s*C(?:\s*(?:NO(?:MOR|\.)?|NUMBER|#))?|"
+    r"NOMOR\s+PRODUK)"
+    r"(?:\s*/\s*(?:ACCOUNT\s*(?:NUMBER|NO)?|NO\.?\s*REK(?:ENING)?|A/C\s*(?:NO)?))?"
+    r"(?:[\s:.\-/]*[A-Za-z]{0,12}){0,2}?[\s:.\-]*"
+    r"(?:(?:IDR|USD|SGD|EUR|AUD|JPY|GBP|CNY|RP\.?)\s*)?"
+    r"(\d[\d\-. ]{4,24}\d)",
     re.IGNORECASE,
 )
 
@@ -67,7 +72,7 @@ BANK_PATTERNS = [
     ("UOB", r"BANK\s+UOB|\bUOB\b|\bTMRW\b"),
     ("HSBC", r"\bHSBC\b"),
 ]
-_BANK_RES = [(name, re.compile( pat, re.IGNORECASE)) for name, pat in BANK_PATTERNS]
+BANK_RES = [(name, re.compile(pat, re.IGNORECASE)) for name, pat in BANK_PATTERNS]
 
 OPENING_RE = re.compile(r"^\W*(SALDO\s+AWAL|SAK\s+AWAL|OPENING\s+BALANCE|BEGINNING\s+BALANCE|SALDO\s+SEBELUMNYA|BALANCE\s+B/?F|BROUGHT\s+FORWARD)\b", re.IGNORECASE)
 STOP_RE = re.compile(
@@ -91,7 +96,7 @@ CATEGORY_RULES = [
     ("Transfer Out", r"TRANSFER KELUAR|TRANSFER KE|TRSF OUT|TRSF KE|TRF KE|REMITTANCE OUT|SWITCHING"),
     ("Transfer In", r"TRANSFER MASUK|TRANSFER DARI|TRSF IN|TRSF DARI|TRF DARI|INCOMING"),
 ]
-_CATEGORY_RES = [(name, re.compile(rf"\b(?:{pattern})\b")) for name, pattern in CATEGORY_RULES]
+CATEGORY_RES = [(name, re.compile(rf"\b(?:{pattern})\b")) for name, pattern in CATEGORY_RULES]
 
 ROLE_KEYS = [
     ("balance", {"saldo", "balance", "saldoakhir"}),
@@ -102,8 +107,8 @@ ROLE_KEYS = [
     ("amount", {"jumlah", "mutasi", "nominal", "amount", "nilai"}),
 ]
 NUMERIC_ROLES = {"balance", "debit", "credit", "amount"}
-_ALL_ROLE_WORDS = sorted({k for _, ks in ROLE_KEYS for k in ks if len(k) >= 5})
+ALL_ROLE_WORDS = sorted({k for _, ks in ROLE_KEYS for k in ks if len(k) >= 5})
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 SUPPORTED_INPUT_SUFFIXES = {".pdf"} | IMAGE_SUFFIXES
-_MONEY_RE = re.compile(r"^[+\-]?\(?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{1,2})\)?(?:DB|DR|CR|D|K|C|[+\-])?$")
-_INT_RE = re.compile(r"^[+\-]?\d{1,13}(?:DB|DR|CR|D|K|C)?$")
+MONEY_RE = re.compile(r"^[+\-]?\(?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{1,2})\)?(?:DB|DR|CR|D|K|C|[+\-])?$")
+INT_RE = re.compile(r"^[+\-]?\d{1,13}(?:DB|DR|CR|D|K|C)?$")
