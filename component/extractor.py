@@ -4,14 +4,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
 
-from .structures import State, ExtractedRow
-from .ocr import iter_pages, first_page_ocr_text
+from .balancecalc import chain_matches, reconcile
 from .constants import SUPPORTED_INPUT_SUFFIXES
-from .layout import process_page, apply_dates, printed_totals
-from .balancecalc import reconcile, _chain_matches
+from .export import excel_bytes
+from .layout import apply_dates, printed_totals, process_page
+from .ocr import extract_header_info, iter_pages
 from .parser import detect_account, detect_bank
+from .structures import ExtractedRow, State
 
-def _row_date_key(row: ExtractedRow, year: int | None) -> tuple[int, int, int, int]:
+def row_date_key(row: ExtractedRow, year: int | None) -> tuple[int, int, int, int]:
     if row.is_opening:
         return (0, 0, 0, 0)
     if row.date_parts is None:
@@ -19,7 +20,12 @@ def _row_date_key(row: ExtractedRow, year: int | None) -> tuple[int, int, int, i
     day, month, row_year = row.date_parts[:3]
     return (1, row_year or year or 0, month, day)
 
-def _summarize_account(rows: list[ExtractedRow], printed: dict[str, float]) -> dict[str, Any]:
+def group_key_label(bank: str, acc: str) -> str:
+    if bank and acc:
+        return f"{bank} - {acc}"
+    return bank or acc or "Default"
+
+def summarize_account(rows: list[ExtractedRow], printed: dict[str, float]) -> dict[str, Any]:
     info = reconcile(rows, None if any(r.is_opening for r in rows) else printed.get("opening"))
     body = [r for r in rows if not r.is_opening]
     opening = next((r.balance for r in rows if r.is_opening), printed.get("opening", info.get("inferred_opening_balance")))
@@ -49,16 +55,17 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = 22
 
     pages: list[dict] = []
     all_years: list[int] = []
-    account_rows: dict[str, list[ExtractedRow]] = {}
-    account_printed: dict[str, dict[str, float]] = {}
-    account_years: dict[str, list[int]] = {}
-    account_banks: dict[str, str] = {}
+    account_rows: dict[tuple[str, str], list[ExtractedRow]] = {}
+    account_printed: dict[tuple[str, str], dict[str, float]] = {}
+    account_years: dict[tuple[str, str], list[int]] = {}
 
     for path in input_paths:
         state, doc_rows, doc_pages, doc_texts = State(), [], [], []
-        p1_ocr_bank = detect_bank(first_page_ocr_text(path, dpi))
-        if p1_ocr_bank:
-            state.bank = p1_ocr_bank
+        hdr_bank, hdr_acc = extract_header_info(path)
+        if hdr_bank:
+            state.bank = hdr_bank
+        if hdr_acc:
+            state.account = hdr_acc
 
         for number, words, page_w, source in iter_pages(path, dpi):
             page_rows, diag, page_text = process_page(words, page_w, number, state)
@@ -68,8 +75,9 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = 22
             doc_texts.append(page_text)
 
         full_text = "\n".join(doc_texts)
-        fallback_acc = state.account or detect_account(full_text) or ""
-        fallback_bank = p1_ocr_bank or state.bank or detect_bank(doc_texts[0] if doc_texts else "") or ""
+        fallback_acc = state.account or hdr_acc or detect_account(full_text) or ""
+        fallback_bank = state.bank or hdr_bank or detect_bank(doc_texts[0] if doc_texts else "") or detect_bank(full_text) or ""
+
         for r in doc_rows:
             r.account = r.account or fallback_acc
             r.bank = r.bank or fallback_bank
@@ -89,58 +97,70 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = 22
         apply_dates(doc_rows, doc_year)
         doc_printed = {**printed_totals(full_text), **state.printed}
 
-        by_acc: dict[str, list[ExtractedRow]] = {}
+        by_group: dict[tuple[str, str], list[ExtractedRow]] = {}
         for r in doc_rows:
-            by_acc.setdefault(r.account, []).append(r)
+            by_group.setdefault((r.bank, r.account), []).append(r)
 
-        for acc, rlist in by_acc.items():
+        for gkey, rlist in by_group.items():
             openings, body = [r for r in rlist if r.is_opening], [r for r in rlist if not r.is_opening]
-            if _chain_matches(openings[:1] + body[::-1])[0] > _chain_matches(openings[:1] + body)[0]:
+            if chain_matches(openings[:1] + body[::-1])[0] > chain_matches(openings[:1] + body)[0]:
                 rlist[:] = openings + body[::-1]
-            account_rows.setdefault(acc, []).extend(rlist)
-            if fallback_bank and not account_banks.get(acc):
-                account_banks[acc] = fallback_bank
-            if len(by_acc) == 1 and doc_printed:
-                account_printed.setdefault(acc, {}).update(doc_printed)
+            account_rows.setdefault(gkey, []).extend(rlist)
+            if len(by_group) == 1 and doc_printed:
+                account_printed.setdefault(gkey, {}).update(doc_printed)
             if doc_year:
-                account_years.setdefault(acc, []).append(doc_year)
+                account_years.setdefault(gkey, []).append(doc_year)
 
-    if "" in account_rows and len(account_rows) > 1:
-        for r in (unknown_rows := account_rows.pop("")):
+    # Merge groups that detected the same account number when one file missed the bank name
+    for (bnk, acc) in list(account_rows.keys()):
+        if not bnk and acc:
+            match_key = next(((b, a) for (b, a) in account_rows if b and a == acc), None)
+            if match_key:
+                rows_to_move = account_rows.pop((bnk, acc))
+                for r in rows_to_move:
+                    r.bank = match_key[0]
+                account_rows[match_key].extend(rows_to_move)
+                if (bnk, acc) in account_printed:
+                    account_printed.setdefault(match_key, {}).update(account_printed.pop((bnk, acc)))
+                if (bnk, acc) in account_years:
+                    account_years.setdefault(match_key, []).extend(account_years.pop((bnk, acc)))
+
+    if ("", "") in account_rows and len(account_rows) > 1:
+        for r in (unknown_rows := account_rows.pop(("", ""))):
             r.account = "Unknown"
-        account_rows["Unknown"] = unknown_rows
-        if "" in account_printed:
-            account_printed["Unknown"] = account_printed.pop("")
-        if "" in account_years:
-            account_years["Unknown"] = account_years.pop("")
-        if "" in account_banks:
-            account_banks["Unknown"] = account_banks.pop("")
+        account_rows[("", "Unknown")] = unknown_rows
+        if ("", "") in account_printed:
+            account_printed[("", "Unknown")] = account_printed.pop(("", ""))
+        if ("", "") in account_years:
+            account_years[("", "Unknown")] = account_years.pop(("", ""))
 
     overall_year = Counter(all_years).most_common(1)[0][0] if all_years else None
     accounts_out: dict[str, dict[str, Any]] = {}
     combined_rows: list[ExtractedRow] = []
 
-    for acc, rlist in account_rows.items():
-        acc_year = Counter(account_years.get(acc, [])).most_common(1)[0][0] if account_years.get(acc) else overall_year
+    for gkey, rlist in account_rows.items():
+        bank_name, acc = gkey
+        acc_year = Counter(account_years.get(gkey, [])).most_common(1)[0][0] if account_years.get(gkey) else overall_year
         apply_dates(rlist, acc_year)
         if len(input_paths) > 1:
-            rlist.sort(key=lambda row: _row_date_key(row, acc_year))
+            rlist.sort(key=lambda row: row_date_key(row, acc_year))
             seen_op = False
             rlist[:] = [r for r in rlist if not (r.is_opening and (seen_op or not (seen_op := True)))]
-        acc_summary = _summarize_account(rlist, account_printed.get(acc, {}))
-        if not rlist and not account_printed.get(acc):
+        acc_summary = summarize_account(rlist, account_printed.get(gkey, {}))
+        if not rlist and not account_printed.get(gkey):
             continue
-        bank_name = account_banks.get(acc) or next((r.bank for r in rlist if r.bank), "")
+        bank_name = bank_name or next((r.bank for r in rlist if r.bank), "")
         acc_summary["bank"] = bank_name
         acc_summary["account"] = acc
-        accounts_out[acc or "Default"] = {
+        out_key = group_key_label(bank_name, acc)
+        accounts_out[out_key] = {
             "account": acc, "bank": bank_name, "rows": rlist,
             "document_year": acc_year, "summary": acc_summary,
         }
         combined_rows.extend(rlist)
 
     if not accounts_out:
-        return {"pages": pages, "rows": [], "accounts": {}, "document_year": overall_year, "summary": _summarize_account([], {})}
+        return {"pages": pages, "rows": [], "accounts": {}, "document_year": overall_year, "summary": summarize_account([], {})}
 
     if len(accounts_out) == 1:
         only = next(iter(accounts_out.values()))
@@ -170,9 +190,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("output"))
     args = parser.parse_args()
     result = extract_statement(args.file)
-    from .export import excel_bytes
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / "transactions.xlsx").write_bytes(excel_bytes(result))
+    (args.output / "results.xlsx").write_bytes(excel_bytes(result))
     print(f"Extracted {len(result['rows'])} transaction rows to {args.output}")
     print(result["summary"])
 
