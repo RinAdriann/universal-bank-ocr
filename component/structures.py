@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import date
 
+
 @dataclass
 class ExtractedRow:
     page: int
@@ -22,10 +23,12 @@ class ExtractedRow:
     bank: str = ""
     time: tuple[int, int, int] | None = field(default=None, repr=False)
 
+
 @dataclass(frozen=True)
 class Amount:
     value: float
     direction: str | None
+
 
 @dataclass
 class Word:
@@ -43,6 +46,7 @@ class Word:
         self.yc = (self.y0 + self.y1) / 2
         self.h = max(self.y1 - self.y0, 1e-6)
 
+
 @dataclass
 class Cell:
     text: str
@@ -58,6 +62,7 @@ class Cell:
     def xc(self) -> float:
         return (self.x0 + self.x1) / 2
 
+
 @dataclass
 class Line:
     cells: list[Cell]
@@ -67,12 +72,14 @@ class Line:
     def text(self) -> str:
         return " ".join(c.text for c in self.cells)
 
+
 @dataclass
 class Layout:
     align: str
     numeric: list[dict]
     tol: float
     text_cols: list[dict]
+
 
 @dataclass
 class State:

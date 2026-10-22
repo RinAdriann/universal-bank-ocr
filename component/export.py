@@ -1,106 +1,188 @@
 import io
 import re
+from dataclasses import asdict
 from datetime import date, datetime
 from typing import Any
+
 import pandas as pd
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from .constants import MONTH_NAMES_ID
+
+from .constants import DETAIL_COLS, MONTH_NAMES_ID, REVIEW_COLS
 from .transactioncat import category
 
-DETAIL_COLS = ["Tanggal", "Kredit", "Debit", "Saldo", "Deskripsi", "Kategori Transaksi"]
-REVIEW_COLS = ["Halaman", "Validation flags", "Full detected text"]
 
 def safe_str(val: Any) -> str:
-    s = "" if val is None else str(val)
-    return f"'{s}" if s.startswith(("=", "+", "-", "@")) else s
+    text = "" if val is None else str(val)
+    if text.startswith(("=", "+", "-", "@")):
+        return f"'{text}"
+    return text
 
-def transaction_record(row: Any) -> dict[str, Any]:
+
+def format_date(dt: Any) -> str:
+    if dt is None:
+        return ""
+    if isinstance(dt, (date, datetime)):
+        return dt.strftime("%d/%m/%Y")
+    return str(dt)
+
+
+def transaction_record(row: Any, format_dt: bool = False, escape_excel: bool = True) -> dict[str, Any]:
+    desc = safe_str(row.description) if escape_excel else (row.description or "")
+    dt_val = format_date(row.date) if format_dt else (row.date if row.date is not None else "")
     return {
-        "Tanggal": row.date if row.date is not None else "",
+        "Tanggal": dt_val,
         "Kredit": row.credit,
         "Debit": row.debit,
         "Saldo": row.balance,
-        "Deskripsi": safe_str(row.description),
+        "Deskripsi": desc,
         "Kategori Transaksi": category(row.description, row.debit, row.credit),
     }
 
-def review_record(row: Any) -> dict[str, Any]:
-    return {"Halaman": row.page, "Validation flags": ", ".join(row.validation), "Full detected text": safe_str(row.raw_text)}
+
+def rows_df(rows: list[Any], format_dt: bool = True, escape_excel: bool = False) -> pd.DataFrame:
+    records = [transaction_record(r, format_dt=format_dt, escape_excel=escape_excel) for r in rows]
+    return pd.DataFrame(records, columns=DETAIL_COLS)
+
+
+def review_df(rows: list[Any], detailed: bool = True, escape_excel: bool = False) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        raw = safe_str(row.raw_text) if escape_excel else (row.raw_text or "")
+        flags = ", ".join(row.validation)
+        if detailed:
+            records.append({
+                "Halaman": row.page,
+                "Confidence": round(getattr(row, "confidence", 1.0), 3),
+                "Human review status": "Needs review" if row.validation else "Pending review",
+                "Validation flags": flags,
+                "Full detected text": raw,
+            })
+        else:
+            records.append({
+                "Halaman": row.page,
+                "Validation flags": flags,
+                "Full detected text": raw,
+            })
+    cols = None if detailed else REVIEW_COLS
+    return pd.DataFrame(records, columns=cols)
+
+
+def serialize_row(row: Any) -> dict[str, Any]:
+    item = asdict(row)
+    item["date"] = row.date.isoformat() if isinstance(row.date, (date, datetime)) else row.date
+    item.pop("date_parts", None)
+    item.pop("time", None)
+    item.pop("pending_dir", None)
+    return item
+
 
 def month_key(dt: Any) -> tuple[int, int] | None:
     if isinstance(dt, (date, datetime)):
         return (dt.year, dt.month)
-    if isinstance(dt, str) and (m := re.match(r"^(\d{2})/(\d{2})(?:/(\d{4}))?$", dt)):
-        return (int(m.group(3) or 0), int(m.group(2)))
+    if isinstance(dt, str):
+        match = re.match(r"^(\d{2})/(\d{2})(?:/(\d{4}))?$", dt)
+        if match:
+            return (int(match.group(3) or 0), int(match.group(2)))
     return None
 
+
 def month_label(ym: tuple[int, int]) -> str:
-    yr, mo = ym
-    mname = MONTH_NAMES_ID.get(mo, f"Bulan {mo}")
-    return f"{mname} {yr}" if yr else mname
+    year, month = ym
+    name = MONTH_NAMES_ID.get(month, f"Bulan {month}")
+    return f"{name} {year}" if year else name
+
 
 def saldo_mengendap(rows: list[Any]) -> dict[tuple[int, int], list[tuple[Any, float]]]:
     by_day: dict[Any, list[Any]] = {}
-    for r in rows:
-        if not getattr(r, "is_opening", False) and r.date is not None and r.balance is not None and month_key(r.date):
-            by_day.setdefault(r.date, []).append(r)
+    for row in rows:
+        if getattr(row, "is_opening", False) or row.date is None or row.balance is None:
+            continue
+        if month_key(row.date):
+            by_day.setdefault(row.date, []).append(row)
+
     by_month: dict[tuple[int, int], list[tuple[Any, float]]] = {}
-    for dt, drows in by_day.items():
+    for dt, day_rows in by_day.items():
         ym = month_key(dt)
         if not ym:
             continue
-        if any(getattr(r, "time", None) is not None for r in drows):
-            chosen = max(enumerate(drows), key=lambda item: (getattr(item[1], "time", None) or (-1, -1, -1), item[0]))[1]
+        if any(getattr(r, "time", None) is not None for r in day_rows):
+            last_row = max(
+                enumerate(day_rows),
+                key=lambda item: (getattr(item[1], "time", None) or (-1, -1, -1), item[0]),
+            )[1]
         else:
-            chosen = drows[-1]
-        by_month.setdefault(ym, []).append((dt, float(chosen.balance)))
+            last_row = day_rows[-1]
+        by_month.setdefault(ym, []).append((dt, float(last_row.balance)))
+
     for ym in by_month:
-        by_month[ym].sort(key=lambda pair: (pair[0] if isinstance(pair[0], date) else date.min))
+        by_month[ym].sort(key=lambda pair: pair[0] if isinstance(pair[0], date) else date.min)
     return dict(sorted(by_month.items()))
+
 
 def top5_monthly(rows: list[Any]) -> dict[tuple[int, int], dict[str, list[Any]]]:
     by_month: dict[tuple[int, int], list[Any]] = {}
-    for r in rows:
-        if not getattr(r, "is_opening", False) and r.date is not None and (ym := month_key(r.date)):
-            by_month.setdefault(ym, []).append(r)
+    for row in rows:
+        if getattr(row, "is_opening", False) or row.date is None:
+            continue
+        ym = month_key(row.date)
+        if ym:
+            by_month.setdefault(ym, []).append(row)
+
     out: dict[tuple[int, int], dict[str, list[Any]]] = {}
     for ym in sorted(by_month):
-        mrows = by_month[ym]
-        top_cr = sorted([r for r in mrows if r.credit and r.credit > 0], key=lambda r: float(r.credit), reverse=True)[:5]
-        top_db = sorted([r for r in mrows if r.debit and r.debit > 0], key=lambda r: float(r.debit), reverse=True)[:5]
+        month_rows = by_month[ym]
+        credits = [r for r in month_rows if r.credit and r.credit > 0]
+        debits = [r for r in month_rows if r.debit and r.debit > 0]
+        top_cr = sorted(credits, key=lambda r: float(r.credit), reverse=True)[:5]
+        top_db = sorted(debits, key=lambda r: float(r.debit), reverse=True)[:5]
         out[ym] = {"cr": top_cr, "db": top_db}
     return out
+
 
 def sheet_title(prefix: str, bank: str, acc: str, used: set[str]) -> str:
     clean_bank = re.sub(r"[\[\]:*?/\\]", "", (bank or "").strip())
     clean_acc = re.sub(r"[\[\]:*?/\\]", "", (acc or "").strip())
     if clean_acc in ("Default", "Unknown"):
         clean_acc = ""
-    if clean_bank and clean_acc:
-        spaced_sfx = f"{clean_bank} - {clean_acc}"
-        compact_sfx = f"{clean_bank}-{clean_acc}"
-    else:
-        spaced_sfx = compact_sfx = clean_bank or clean_acc
 
-    if not spaced_sfx:
-        cand = prefix
+    if clean_bank and clean_acc:
+        spaced = f"{clean_bank} - {clean_acc}"
+        compact = f"{clean_bank}-{clean_acc}"
     else:
-        cand = f"{prefix} {spaced_sfx}"
-        if len(cand) > 31:
-            cand = f"{prefix} {compact_sfx}"
-        if len(cand) > 31:
-            short_p = "Saldo" if prefix.lower().startswith("saldo") else prefix[: max(2, 30 - len(compact_sfx))].rstrip()
-            cand = f"{short_p} {compact_sfx}"
-    cand = cand[:31]
-    base = cand
+        spaced = compact = clean_bank or clean_acc
+
+    if not spaced:
+        name = prefix
+    else:
+        name = f"{prefix} {spaced}"
+        if len(name) > 31:
+            name = f"{prefix} {compact}"
+        if len(name) > 31:
+            short_prefix = "Saldo" if prefix.lower().startswith("saldo") else prefix[: max(2, 30 - len(compact))].rstrip()
+            name = f"{short_prefix} {compact}"
+
+    name = name[:31]
+    base = name
     idx = 2
-    while cand in used:
+    while name in used:
         tag = f"_{idx}"
-        cand = f"{base[: 31 - len(tag)]}{tag}"
+        name = f"{base[: 31 - len(tag)]}{tag}"
         idx += 1
-    used.add(cand)
-    return cand
+    used.add(name)
+    return name
+
+
+def write_date_cell(ws: Any, row_idx: int, col_idx: int, dt: Any) -> None:
+    cell = ws.cell(row_idx, col_idx, dt if dt is not None else "")
+    if isinstance(dt, (date, datetime)):
+        cell.number_format = "dd/mm/yyyy"
+
+
+def write_money_cell(ws: Any, row_idx: int, col_idx: int, val: float | None) -> None:
+    cell = ws.cell(row_idx, col_idx, val)
+    cell.number_format = "#,##0.00"
+
 
 def saldo_mengendap_sheet(ws: Any, rows: list[Any], bold_font: Font) -> None:
     monthly = saldo_mengendap(rows)
@@ -110,24 +192,45 @@ def saldo_mengendap_sheet(ws: Any, rows: list[Any], bold_font: Font) -> None:
         ws.column_dimensions["A"].width = 14
         ws.column_dimensions["B"].width = 18
         return
-    for m_idx, (ym, items) in enumerate(monthly.items()):
-        c0 = 1 + m_idx * 3
-        c1 = c0 + 1
-        title_cell = ws.cell(1, c0, month_label(ym))
-        title_cell.font = bold_font
-        ws.merge_cells(start_row=1, start_column=c0, end_row=1, end_column=c1)
-        ws.cell(2, c0, "Tanggal").font = bold_font
-        ws.cell(2, c1, "Saldo Mengendap").font = bold_font
-        for r_idx, (dt, bal) in enumerate(items, start=3):
-            dc = ws.cell(r_idx, c0, dt)
-            if isinstance(dt, (date, datetime)):
-                dc.number_format = "dd/mm/yyyy"
-            bc = ws.cell(r_idx, c1, bal)
-            bc.number_format = "#,##0.00"
-        ws.column_dimensions[get_column_letter(c0)].width = 14
-        ws.column_dimensions[get_column_letter(c1)].width = 18
-        ws.column_dimensions[get_column_letter(c1 + 1)].width = 4
+
+    for idx, (ym, items) in enumerate(monthly.items()):
+        col_date = 1 + idx * 3
+        col_bal = col_date + 1
+        ws.cell(1, col_date, month_label(ym)).font = bold_font
+        ws.merge_cells(start_row=1, start_column=col_date, end_row=1, end_column=col_bal)
+        ws.cell(2, col_date, "Tanggal").font = bold_font
+        ws.cell(2, col_bal, "Saldo Mengendap").font = bold_font
+
+        for row_idx, (dt, bal) in enumerate(items, start=3):
+            write_date_cell(ws, row_idx, col_date, dt)
+            write_money_cell(ws, row_idx, col_bal, bal)
+
+        ws.column_dimensions[get_column_letter(col_date)].width = 14
+        ws.column_dimensions[get_column_letter(col_bal)].width = 18
+        ws.column_dimensions[get_column_letter(col_bal + 1)].width = 4
     ws.freeze_panes = "A3"
+
+
+def write_top5_block(
+    ws: Any,
+    start_row: int,
+    col_start: int,
+    title: str,
+    amt_header: str,
+    rows: list[Any],
+    field: str,
+    bold_font: Font,
+) -> None:
+    ws.cell(start_row, col_start, title).font = bold_font
+    ws.merge_cells(start_row=start_row, start_column=col_start, end_row=start_row, end_column=col_start + 2)
+    for offset, header in enumerate(("Tanggal", amt_header, "Deskripsi")):
+        ws.cell(start_row + 1, col_start + offset, header).font = bold_font
+
+    for idx, row in enumerate(rows, start=start_row + 2):
+        write_date_cell(ws, idx, col_start, row.date)
+        write_money_cell(ws, idx, col_start + 1, getattr(row, field))
+        ws.cell(idx, col_start + 2, safe_str(row.description))
+
 
 def top5_sheet(ws: Any, rows: list[Any], bold_font: Font) -> None:
     monthly = top5_monthly(rows)
@@ -136,91 +239,81 @@ def top5_sheet(ws: Any, rows: list[Any], bold_font: Font) -> None:
         ws.cell(1, 2, "Nominal").font = bold_font
         ws.cell(1, 3, "Deskripsi").font = bold_font
         return
-    for m_idx, (ym, data) in enumerate(monthly.items()):
-        c0 = 1 + m_idx * 4
+
+    for idx, (ym, data) in enumerate(monthly.items()):
+        col_start = 1 + idx * 4
         label = month_label(ym)
-        ws.cell(1, c0, f"{label} - Top 5 CR").font = bold_font
-        ws.merge_cells(start_row=1, start_column=c0, end_row=1, end_column=c0 + 2)
-        for offset, h in enumerate(("Tanggal", "Kredit", "Deskripsi")):
-            ws.cell(2, c0 + offset, h).font = bold_font
-        for idx, r in enumerate(data["cr"], start=3):
-            dc = ws.cell(idx, c0, r.date if r.date is not None else "")
-            if isinstance(r.date, (date, datetime)):
-                dc.number_format = "dd/mm/yyyy"
-            ac = ws.cell(idx, c0 + 1, r.credit)
-            ac.number_format = "#,##0.00"
-            ws.cell(idx, c0 + 2, safe_str(r.description))
+        write_top5_block(ws, 1, col_start, f"{label} - Top 5 CR", "Kredit", data["cr"], "credit", bold_font)
+        write_top5_block(ws, 9, col_start, f"{label} - Top 5 DB", "Debit", data["db"], "debit", bold_font)
 
-        db_start = 9
-        ws.cell(db_start, c0, f"{label} - Top 5 DB").font = bold_font
-        ws.merge_cells(start_row=db_start, start_column=c0, end_row=db_start, end_column=c0 + 2)
-        for offset, h in enumerate(("Tanggal", "Debit", "Deskripsi")):
-            ws.cell(db_start + 1, c0 + offset, h).font = bold_font
-        for idx, r in enumerate(data["db"], start=db_start + 2):
-            dc = ws.cell(idx, c0, r.date if r.date is not None else "")
-            if isinstance(r.date, (date, datetime)):
-                dc.number_format = "dd/mm/yyyy"
-            ac = ws.cell(idx, c0 + 1, r.debit)
-            ac.number_format = "#,##0.00"
-            ws.cell(idx, c0 + 2, safe_str(r.description))
-
-        ws.column_dimensions[get_column_letter(c0)].width = 14
-        ws.column_dimensions[get_column_letter(c0 + 1)].width = 18
-        ws.column_dimensions[get_column_letter(c0 + 2)].width = 50
-        ws.column_dimensions[get_column_letter(c0 + 3)].width = 4
+        ws.column_dimensions[get_column_letter(col_start)].width = 14
+        ws.column_dimensions[get_column_letter(col_start + 1)].width = 18
+        ws.column_dimensions[get_column_letter(col_start + 2)].width = 50
+        ws.column_dimensions[get_column_letter(col_start + 3)].width = 4
     ws.freeze_panes = "A3"
+
 
 def excel_bytes(result: dict[str, Any]) -> bytes:
     output = io.BytesIO()
     rows = result.get("rows", [])
-    if accounts_map := result.get("accounts"):
-        groups = [(data.get("account") or "", data.get("bank") or "", data["rows"]) for _, data in accounts_map.items()]
+    accounts_map = result.get("accounts")
+
+    if accounts_map:
+        groups = [
+            (data.get("account") or "", data.get("bank") or "", data["rows"])
+            for data in accounts_map.values()
+        ]
     else:
-        by_acc: dict[tuple[str, str], list[Any]] = {}
-        for r in rows:
-            key = (getattr(r, "bank", "") or "", getattr(r, "account", "") or "Default")
-            by_acc.setdefault(key, []).append(r)
-        groups = [(acc, bank, rlist) for (bank, acc), rlist in by_acc.items()]
+        groups = [("", "", rows)]
 
     used_names: set[str] = set()
     bold_font = Font(bold=True)
+    sheet_specs = (
+        ("Detail", lambda _: True),
+        ("In", lambda r: bool(r.credit and r.credit > 0)),
+        ("Out", lambda r: bool(r.debit and r.debit > 0)),
+    )
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for acc, bank, acc_rows in groups:
-            for prefix, pred in (
-                ("Detail", lambda _: True),
-                ("In", lambda r: bool(r.credit and r.credit > 0)),
-                ("Out", lambda r: bool(r.debit and r.debit > 0)),
-            ):
+            for prefix, pred in sheet_specs:
                 sname = sheet_title(prefix, bank, acc, used_names)
-                recs = [transaction_record(r) for r in acc_rows if pred(r)]
-                pd.DataFrame(recs, columns=DETAIL_COLS).to_excel(writer, sheet_name=sname, index=False)
+                filtered = [r for r in acc_rows if pred(r)]
+                rows_df(filtered, format_dt=False, escape_excel=True).to_excel(writer, sheet_name=sname, index=False)
+
                 ws = writer.sheets[sname]
                 ws.freeze_panes = "A2"
-                for col, w in zip(["A", "B", "C", "D", "E", "F"], [14, 16, 16, 16, 80, 22]):
-                    ws.column_dimensions[col].width = w
-                for r in ws.iter_rows(min_row=2):
-                    if isinstance(r[0].value, (date, datetime)):
-                        r[0].number_format = "dd/mm/yyyy"
-                    for c in r[1:4]:
-                        c.number_format = "#,##0.00"
+                for col, width in zip(["A", "B", "C", "D", "E", "F"], [14, 16, 16, 16, 80, 22]):
+                    ws.column_dimensions[col].width = width
+                for excel_row in ws.iter_rows(min_row=2):
+                    if isinstance(excel_row[0].value, (date, datetime)):
+                        excel_row[0].number_format = "dd/mm/yyyy"
+                    for cell in excel_row[1:4]:
+                        cell.number_format = "#,##0.00"
 
             sm_name = sheet_title("Saldo Mengendap", bank, acc, used_names)
-            sm_ws = writer.book.create_sheet(title=sm_name)
-            saldo_mengendap_sheet(sm_ws, acc_rows, bold_font)
+            saldo_mengendap_sheet(writer.book.create_sheet(title=sm_name), acc_rows, bold_font)
 
             t5_name = sheet_title("Top 5", bank, acc, used_names)
-            t5_ws = writer.book.create_sheet(title=t5_name)
-            top5_sheet(t5_ws, acc_rows, bold_font)
+            top5_sheet(writer.book.create_sheet(title=t5_name), acc_rows, bold_font)
 
             rev_name = sheet_title("Review", bank, acc, used_names)
-            rev_recs = [review_record(r) for r in acc_rows]
-            pd.DataFrame(rev_recs, columns=REVIEW_COLS).to_excel(writer, sheet_name=rev_name, index=False)
+            review_df(acc_rows, detailed=False, escape_excel=True).to_excel(writer, sheet_name=rev_name, index=False)
             rev_ws = writer.sheets[rev_name]
             rev_ws.freeze_panes = "A2"
-            for col, w in zip(["A", "B", "C"], [10, 28, 100]):
-                rev_ws.column_dimensions[col].width = w
+            for col, width in zip(["A", "B", "C"], [10, 28, 100]):
+                rev_ws.column_dimensions[col].width = width
 
     return output.getvalue()
 
-__all__ = ["excel_bytes", "month_label", "saldo_mengendap", "top5_monthly"]
+
+__all__ = [
+    "excel_bytes",
+    "format_date",
+    "month_label",
+    "review_df",
+    "rows_df",
+    "saldo_mengendap",
+    "serialize_row",
+    "top5_monthly",
+]
