@@ -23,8 +23,8 @@ Indonesian Bank Statement OCR is a local extraction, reconciliation, and reporti
 
 | Spec | Fitur | Status | Folder |
 | --- | --- | --- | --- |
-| **001** | Core Extraction Pipeline Audit, Deduplication & Refactoring | ✅ Completed | `specs/001_pipeline_audit_refactor/` |
-| **002** | Camera-Photo Detection, Illumination Normalization & Strip-Slope Dewarping | ✅ Completed | `specs/002_camera_photo_preprocess/` |
+| **001** | Core Extraction Pipeline Audit, Deduplication & Refactoring |  Completed | `specs/001_pipeline_audit_refactor/` |
+| **002** | Camera-Photo Detection, Illumination Normalization & Strip-Slope Dewarping |  Completed | `specs/002_camera_photo_preprocess/` |
 
 ### Spec 002 — Camera-Photo Detection, Illumination Normalization & Strip-Slope Dewarping (`specs/002_camera_photo_preprocess/`)
 **Fokus:** Automatically detect camera-taken bank statement photos (even when embedded inside PDFs) and normalize uneven gray lighting, curved perspective row tilt, and blurry OCR date/amount glitches without affecting digital or clean scanned PDF speed.
@@ -32,8 +32,8 @@ Indonesian Bank Statement OCR is a local extraction, reconciliation, and reporti
 #### Functional Requirements (Spec 002)
 | ID | Fitur | Deskripsi Detail | Status |
 | --- | --- | --- | --- |
-| **FR-06** | Fast Camera-Photo Detection & Normalization | `< 1 ms` thumbnail percentile detector (`is_camera_photo`), morphological background division (`normalize_illumination`), 5-band strip-slope row rectification (`dewarp_rows`), and `use_angle_cls = False` to prevent 180° flips on numeric cells. | ✅ Completed |
-| **FR-07** | Blurry-OCR Date, Amount & Balance Resilience | Recover dates with missing slashes or `O`/`D`/`C`/`Q` leading-zero misreads, normalize `.00D`/`.00K` OCR suffix noise, and apply balance-verified `1000x` `.00D -> .000` scaling and 2-step balance bridge repair in `reconcile()`. | ✅ Completed |
+| **FR-06** | Fast Camera-Photo Detection & Normalization | `< 1 ms` thumbnail percentile detector (`is_camera_photo`), morphological background division (`normalize_illumination`), 5-band strip-slope row rectification (`dewarp_rows`), and `use_angle_cls = False` to prevent 180° flips on numeric cells. |  Completed |
+| **FR-07** | Blurry-OCR Date, Amount & Balance Resilience | Recover dates with missing slashes or `O`/`D`/`C`/`Q` leading-zero misreads, normalize `.00D`/`.00K` OCR suffix noise, and apply balance-verified `1000x` `.00D -> .000` scaling and 2-step balance bridge repair in `reconcile()`. |  Completed |
 
 #### Execution Steps (Spec 002)
 * [x] **Camera-Photo Preprocessing Pipeline:** Implement `is_camera_photo`, `normalize_illumination`, and `dewarp_rows` in `component/ocr.py` (`specs/002_camera_photo_preprocess/plan.md`).
@@ -45,11 +45,11 @@ Indonesian Bank Statement OCR is a local extraction, reconciliation, and reporti
 #### Functional Requirements (Spec 001)
 | ID | Fitur | Deskripsi Detail | Status |
 | --- | --- | --- | --- |
-| **FR-01** | Hybrid OCR & Header Detection | Digital text extraction via `PyMuPDF` with `pdfplumber` fallback and automatic `RapidOCR` + deskew fallback; top-30% first-page header/logo detection for bank and account number. | ✅ Completed |
-| **FR-02** | Adaptive Table Layout Reconstruction | Coordinate-based line grouping, fuzzy header role matching, numeric column clustering, and multi-line transaction merging across pages. | ✅ Completed |
-| **FR-03** | Unified Direction & Date/Amount Parsing | Consolidated debit/credit marker and narrative hint parsing (fixing `TRSF`/`TRF` collision bug), multi-format Indonesian/English date & time extraction, and currency normalization. | ✅ Completed |
-| **FR-04** | Balance Chain Reconciliation | Chronological ordering (`as_printed` vs `newest_first`), global/row-level DB/CR swap recovery, missing amount/balance derivation, and confidence scoring. | ✅ Completed |
-| **FR-05** | Multi-Account Grouping & Analytics Export | Automatic grouping by `(bank, account)`, single-pass date resolution, intra-day chronological sorting, 6-sheet per-account Excel export (`Detail`, `In`, `Out`, `Saldo Mengendap`, `Top 5`, `Review`), and shared UI/Export DataFrame builders. | ✅ Completed |
+| **FR-01** | Hybrid OCR & Header Detection | Digital text extraction via `PyMuPDF` with `pdfplumber` fallback and automatic `RapidOCR` + deskew fallback; top-30% first-page header/logo detection for bank and account number. |  Completed |
+| **FR-02** | Adaptive Table Layout Reconstruction | Coordinate-based line grouping, fuzzy header role matching, numeric column clustering, and multi-line transaction merging across pages. |  Completed |
+| **FR-03** | Unified Direction & Date/Amount Parsing | Consolidated debit/credit marker and narrative hint parsing (fixing `TRSF`/`TRF` collision bug), multi-format Indonesian/English date & time extraction, and currency normalization. |  Completed |
+| **FR-04** | Balance Chain Reconciliation | Chronological ordering (`as_printed` vs `newest_first`), global/row-level DB/CR swap recovery, missing amount/balance derivation, and confidence scoring. |  Completed |
+| **FR-05** | Multi-Account Grouping & Analytics Export | Automatic grouping by `(bank, account)`, single-pass date resolution, intra-day chronological sorting, 6-sheet per-account Excel export (`Detail`, `In`, `Out`, `Saldo Mengendap`, `Top 5`, `Review`), and shared UI/Export DataFrame builders. |  Completed |
 
 #### Execution Steps (Spec 001)
 * [x] **Pipeline Audit & Root Cause Analysis:** Identify redundant functions, dead code, double-pass bugs, and hardcoded settings (`specs/001_pipeline_audit_refactor/analysis.md`).
