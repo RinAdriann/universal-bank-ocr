@@ -3,6 +3,7 @@ import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
+from typing import Any, Sequence
 
 from .balancecalc import chain_matches, reconcile
 from .constants import SUPPORTED_INPUT_SUFFIXES
@@ -19,8 +20,7 @@ def row_date_key(row: ExtractedRow, year: int | None) -> tuple[int, int, int, in
         return (2, 0, 0, 0)
     day, month, row_year = row.date_parts[:3]
     return (1, row_year or year or 0, month, day)
-
-
+        
 def group_key_label(bank: str, acc: str) -> str:
     if bank and acc:
         return f"{bank} - {acc}"
@@ -236,10 +236,12 @@ extract_statements = extract_statement
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract Indonesian bank statements to Excel.")
     parser.add_argument("file", type=Path, nargs="+")
+    parser.add_argument("file", type=Path, nargs="+")
     parser.add_argument("--output", type=Path, default=Path("output"))
     args = parser.parse_args()
     result = extract_statement(args.file)
     args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "results.xlsx").write_bytes(excel_bytes(result))
     (args.output / "results.xlsx").write_bytes(excel_bytes(result))
     print(f"Extracted {len(result['rows'])} transaction rows to {args.output}")
     print(result["summary"])

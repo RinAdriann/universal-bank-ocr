@@ -40,6 +40,8 @@ def choose_direction(prev: float | None, bal: float | None, amt: float, explicit
         return by_hint, "description"
     if by_bal:
         return by_bal, "balance_delta"
+    if by_bal:
+        return by_bal, "balance_delta"
     return None, "unknown"
 
 
@@ -133,6 +135,7 @@ def reconcile(rows: list[ExtractedRow], opening_hint: float | None = None) -> di
             elif dir_hint and evidence == "balance_delta" and dir_hint != direction:
                 row.validation.append("direction_corrected")
             setattr(row, "credit" if direction == "credit" else "debit", mag)
+            setattr(row, "credit" if direction == "credit" else "debit", mag)
         elif signed is not None and row.balance is not None and prev is not None:
             diff = row.balance - prev
             nxt = body[idx + 1] if idx + 1 < len(body) else None
@@ -177,6 +180,7 @@ def reconcile(rows: list[ExtractedRow], opening_hint: float | None = None) -> di
             if abs(diff) >= TOL:
                 setattr(row, "credit" if diff > 0 else "debit", abs(diff))
                 row.validation.append("amount_derived")
+
 
         if row.balance is None and prev is not None:
             row.balance = prev + (row.credit or 0.0) - (row.debit or 0.0)

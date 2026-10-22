@@ -26,6 +26,9 @@ def format_date(dt: Any) -> str:
         return dt.strftime("%d/%m/%Y")
     return str(dt)
 
+def _safe_str(val: Any) -> str:
+    s = "" if val is None else str(val)
+    return f"'{s}" if s.startswith(("=", "+", "-", "@")) else s
 
 def transaction_record(row: Any, format_dt: bool = False, escape_excel: bool = True) -> dict[str, Any]:
     desc = safe_str(row.description) if escape_excel else (row.description or "")
