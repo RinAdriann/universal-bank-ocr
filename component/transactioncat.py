@@ -1,16 +1,32 @@
 from .constants import CATEGORY_RES
 
+
 def category(description: str, debit: float | None, credit: float | None) -> str:
     if not description:
         return "Uncategorized"
-    upper = description.upper()
+
+    text = description.upper()
     for name, pattern in CATEGORY_RES:
-        if pattern.search(upper):
+        if pattern.search(text):
             return name
-    return "Transfer Out / Debit" if (debit or 0) > 0 else "Transfer In / Credit" if (credit or 0) > 0 else "Uncategorized"
+
+    if debit and debit > 0:
+        return "Transfer Out / Debit"
+    if credit and credit > 0:
+        return "Transfer In / Credit"
+    return "Uncategorized"
+
 
 def flow(debit: float | None, credit: float | None) -> str:
-    has_d, has_c = bool(debit and debit > 0), bool(credit and credit > 0)
-    return "Both" if has_d and has_c else "Money in" if has_c else "Money out" if has_d else "Unknown"
+    has_debit = bool(debit and debit > 0)
+    has_credit = bool(credit and credit > 0)
+    if has_debit and has_credit:
+        return "Both"
+    if has_credit:
+        return "Money in"
+    if has_debit:
+        return "Money out"
+    return "Unknown"
+
 
 __all__ = ["category", "flow"]

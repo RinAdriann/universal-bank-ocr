@@ -1,3 +1,16 @@
-﻿.venv/
+.venv/
 __pycache__/
 *.pyc
+
+# Environment files
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+
+# Reference, import, and build/output folders
+/import
+/reference
+/output
+node_modules/

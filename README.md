@@ -4,7 +4,7 @@ Snapshot dokumentasi: 2026-10-19 (v0.2 — Python/Streamlit & RapidOCR)
 
 Indonesian Bank Statement OCR adalah layanan ekstraksi lokal untuk membaca, merekonsiliasi, dan mengekspor mutasi rekening koran (PDF digital, hasil scan, maupun gambar) dari berbagai bank di Indonesia menjadi laporan **Excel (`.xlsx`)** dan **JSON** secara otomatis.
 
-> **Update v0.2:** mendukung upload **multi-dokumen** sekaligus dengan pengelompokan otomatis berdasarkan **nama bank & nomor rekening**, deteksi header/logo pada 30% area atas halaman pertama, analitik bulanan (**Saldo Mengendap** & **Top 5 CR/DB**), serta pemrosesan lokal menggunakan direktori sementara terisolasi demi menjaga privasi data. Riwayat perubahan terdokumentasi di `CHANGELOG.md`.
+> **Update v0.2:** mendukung upload **multi-dokumen** sekaligus dengan pengelompokan berdasarkan **nama bank & nomor rekening**, deteksi header/logo pada halaman pertama, analitik bulanan, serta pemrosesan lokal menggunakan direktori sementara terisolasi demi menjaga privasi data.
 
 ## Arsitektur
 
@@ -27,7 +27,7 @@ component/ (Core Extraction Engine)
 ## Tech Stack
 
 - **Runtime & UI:** Python 3.12+ + Streamlit
-- **PDF & Text Layer:** `PyMuPDF` (`fitz`), `pdfplumber`, `pypdfium2`
+- **PDF & Text Layer:** `PyMuPDF` (`fitz`)
 - **OCR & Image Processing:** `rapidocr-onnxruntime` (CPU ONNX) + `opencv-python-headless` + `numpy`
 - **Data & Export:** `pandas` + `openpyxl`
 - **Deployment:** Docker (`python:3.12-slim`)
@@ -81,7 +81,7 @@ Hasil ekstraksi akan disimpan ke `output/results.xlsx` beserta ringkasan rekonsi
 
 ## Catatan Penting
 
-- **Hybrid Pipeline:** halaman PDF digital langsung diekstrak melalui koordinat kata `PyMuPDF` tanpa OCR; halaman scan atau gambar otomatis dialihkan ke `RapidOCR` dengan *preprocessing* dan *deskew*.
+- **Hybrid Pipeline:** halaman PDF digital langsung diekstrak melalui `PyMuPDF`; halaman scan atau gambar otomatis dialihkan ke `RapidOCR` dengan *preprocessing* dan *deskew*.
 - **Deteksi Bank & Rekening (Top 30% Header):** sistem memeriksa teks digital dan melakukan OCR pada 30% bagian atas halaman pertama untuk mengenali nama/logo bank serta nomor rekening secara akurat.
 - **Rekonsiliasi Otomatis:** urutan transaksi (*oldest-first* vs *newest-first*), kolom mutasi tunggal, maupun posisi Debit/Kredit yang tertukar dikoreksi otomatis berdasarkan selisih rantai saldo (`chain_reconciles`).
 - **Privasi & Keamanan Data:** seluruh proses berjalan 100% lokal tanpa panggilan API eksternal, file upload dibersihkan otomatis melalui `TemporaryDirectory`, dan sel teks di Excel dilindungi dari *formula injection*.
