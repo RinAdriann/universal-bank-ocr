@@ -90,7 +90,6 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files and st.button("Extract", type="primary"):
-if uploaded_files and st.button("Extract", type="primary"):
     started_at = time.perf_counter()
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -176,6 +175,5 @@ if uploaded_files and st.button("Extract", type="primary"):
         with st.expander("Page diagnostics"):
             st.json(result["pages"])
     except Exception as exc:
-        logger.exception("Extraction failed after %.3f seconds", time.perf_counter() - started_at)
         logger.exception("Extraction failed after %.3f seconds", time.perf_counter() - started_at)
         st.error(str(exc))

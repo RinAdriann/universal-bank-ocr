@@ -208,7 +208,6 @@ def learn_numeric(
 def detect_start(line: Line, page_w: float) -> tuple[int, tuple, str, tuple[int, int, int] | None] | None:
     for idx, cell in enumerate(line.cells[:3]):
         if (idx > 0 and not all(re.fullmatch(r"\d{1,4}\.?", c.text) for c in line.cells[:idx])) or cell.x0 > 0.55 * page_w:
-        if (idx > 0 and not all(re.fullmatch(r"\d{1,4}\.?", c.text) for c in line.cells[:idx])) or cell.x0 > 0.55 * page_w:
             return None
         if (cell.text.upper().startswith("PEND") and len(cell.text) <= 6) or cell.text.rstrip(".").lower() in MONTHS:
             return idx, (None, None, None), "", None
@@ -287,10 +286,7 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
     text_cells = [c for i, (di, _, _, _) in starts.items() for j, c in enumerate(lines[i].cells) if j > di and not (c.money and c.role)]
     date_starts = [lines[i].cells[di].x0 for i, (di, _, _, _) in starts.items()]
     text_cols: list[dict] = layout.text_cols if (layout.text_cols and n_start < 3) else []
-    if not text_cols and date_starts:
-    text_cells = [c for i, (di, _, _, _) in starts.items() for j, c in enumerate(lines[i].cells) if j > di and not (c.money and c.role)]
-    date_starts = [lines[i].cells[di].x0 for i, (di, _, _, _) in starts.items()]
-    text_cols: list[dict] = layout.text_cols if (layout.text_cols and n_start < 3) else []
+    
     if not text_cols and date_starts:
         thr = 1 if n_start <= 2 else max(2, math.ceil(0.15 * n_start))
         clusters = [c for c in cluster(text_cells, lambda c: c.x0, 0.8 * height) if len(c) >= thr]
@@ -351,17 +347,13 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
                 row.validation.append("multiple_amounts")
             else:
                 setattr(row, role, abs(amt.value))
-        elif role == "amount" and amt.value != 0:
-            else:
-                setattr(row, role, abs(amt.value))
+
         elif role == "amount" and amt.value != 0:
             if row.pending_mutasi is not None:
                 row.validation.append("multiple_amounts")
             else:
                 row.pending_mutasi, row.pending_dir = abs(amt.value), amt.direction or direction
-            else:
-                row.pending_mutasi, row.pending_dir = abs(amt.value), amt.direction or direction
-
+            
     pre_desc: list[str] = []
     for i in region:
         line = lines[i]
@@ -389,7 +381,6 @@ def process_page(words: list[Word], page_w: float, page_no: int, state: State) -
             closed, cells = False, line.cells[di + 1:]
         else:
             text = line.text
-            if OPENING_RE.match(text) and not state.has_rows and not rows and first_start is not None and i < first_start:
             if OPENING_RE.match(text) and not state.has_rows and not rows and first_start is not None and i < first_start:
                 bal = [c for c in line.cells if c.money and c.role == "balance"] or [c for c in line.cells if c.money][-1:]
                 if bal:

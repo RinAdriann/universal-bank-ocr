@@ -16,7 +16,6 @@ from .structures import Word
 def words_pymupdf(page: Any) -> list[Word]:
     words: list[Word] = []
     for block in page.get_text("rawdict").get("blocks", []):
-    for block in page.get_text("rawdict").get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -37,8 +36,6 @@ def words_pymupdf(page: Any) -> list[Word]:
 
             for span in line.get("spans", []):
                 for ch in span.get("chars", []):
-                    c, (x0, y0, x1, y1) = ch["c"], ch["bbox"]
-                    if c.isspace() or (cur and x0 - cur[-1][3] > 0.25 * max(y1 - y0, 1.0)):
                     c, (x0, y0, x1, y1) = ch["c"], ch["bbox"]
                     if c.isspace() or (cur and x0 - cur[-1][3] > 0.25 * max(y1 - y0, 1.0)):
                         flush()
@@ -68,7 +65,7 @@ def is_camera_photo(gray: np.ndarray) -> bool:
         float(np.percentile(small[: sh // 2, : sw // 2], 80)),
         float(np.percentile(small[: sh // 2, sw // 2 :], 80)),
         float(np.percentile(small[sh // 2 :, : sw // 2], 80)),
-        float(np.percentile(small[sh // 2 :, sw // 2 :], 80)),
+        float(np.percentile(small[sh // 2 :, sw // 2 :], 80))
     )
     return max(quads) - min(quads) >= 15.0
 
