@@ -1,7 +1,4 @@
 import json
-import logging
-import json
-import logging
 import os
 import tempfile
 import time
@@ -11,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from component import excel_bytes, extract_statement
+from component.structures import StatementAuditResult
 from component.constants import ALLOWED_EXTS
 from component.export import (
     format_date,
@@ -22,15 +20,38 @@ from component.export import (
     top5_monthly,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+ISSUE_DISPLAY_COLS = [
+    "transaction_index",
+    "pdf_page",
+    "date",
+    "issue_type",
+    "printed_value",
+    "expected_value",
+    "discrepancy",
+    "description",
+]
 
 
-def render_alerts(summary: dict) -> None:
-    if summary.get("chain_reconciles") is True:
+def render_top_summary_banner(rows: list, summary: dict, audit_result: StatementAuditResult | None) -> None:
+    total_txns = len(rows)
+    reconciled_pct = summary.get(
+        "reconciled_pct",
+        round(100.0 * sum(1 for r in rows if getattr(r, "is_reconciled", True)) / max(total_txns, 1), 1),
+    )
+    total_flags = len(audit_result.issues) if audit_result is not None else summary.get("rows_flagged", 0)
+
+    col_tx, col_rec, col_flg = st.columns(3)
+    col_tx.metric("Total Transactions", total_txns)
+    col_rec.metric("Reconciliation %", f"{reconciled_pct:.1f}%")
+    col_flg.metric("Total Flags", total_flags)
+
+    if audit_result is not None:
+        st.code(audit_result.summary_line(), language="text")
+
+    if summary.get("chain_reconciles") is True and total_flags == 0:
         st.info("Balance check passed.")
-    elif summary.get("chain_reconciles") is False:
-        st.warning("Balance check failed. Review flagged rows.")
+    elif summary.get("chain_reconciles") is False or total_flags > 0:
+        st.warning("Audit issues or balance discrepancies detected. Inspect 'View Audit Issues & Discrepancies' below.")
     if summary.get("printed_totals_match") is False:
         st.warning("Extracted totals differ from the totals printed on the statement.")
 
@@ -69,12 +90,28 @@ def render_analytics(rows: list, suffix: str = "") -> None:
                     st.dataframe(db_df, width="stretch", hide_index=True)
 
 
-def render_account_view(rows: list, summary: dict, label: str = "") -> None:
+def render_account_view(
+    rows: list,
+    summary: dict,
+    audit_result: StatementAuditResult | None = None,
+    label: str = "",
+) -> None:
     suffix = f" ({label})" if label else ""
     if label:
         st.subheader(f"Rekening: {label}")
-    render_alerts(summary)
-    st.dataframe(rows_df(rows), width="stretch", hide_index=True)
+
+    render_top_summary_banner(rows, summary, audit_result)
+
+    tx_df = audit_result.transactions_df if audit_result is not None else rows_df(rows)
+    st.dataframe(tx_df, width="stretch", hide_index=False)
+
+    with st.expander(f"View Audit Issues & Discrepancies{suffix}", expanded=bool(audit_result and not audit_result.is_clean)):
+        if audit_result is not None:
+            issues_table = audit_result.issues_df[ISSUE_DISPLAY_COLS]
+        else:
+            issues_table = pd.DataFrame(columns=ISSUE_DISPLAY_COLS)
+        st.dataframe(issues_table, width="stretch", hide_index=True)
+
     render_analytics(rows, suffix)
     with st.expander(f"Review information{suffix}"):
         st.dataframe(review_df(rows), width="stretch", hide_index=True)
@@ -115,12 +152,6 @@ if uploaded_files and st.button("Extract", type="primary"):
 
         elapsed = time.perf_counter() - started_at
         timer_placeholder.caption(f"Processing time: {elapsed:.2f} seconds")
-        logger.info(
-            "Extraction finished: %s rows from %s pages in %.3f seconds",
-            len(result["rows"]),
-            len(result["pages"]),
-            elapsed,
-        )
 
         accounts = result.get("accounts") or {}
         year = result.get("document_year")
@@ -137,22 +168,33 @@ if uploaded_files and st.button("Extract", type="primary"):
 
         st.success(f"Completed: {len(result['rows'])} transaction rows from {len(result['pages'])} pages{acc_label}{year_label}.")
 
-        flagged_count = sum(bool(r.validation) for r in result["rows"])
-        if flagged_count:
-            st.warning(f"{flagged_count} row(s) need review")
-
         if len(accounts) > 1:
             for acc_key, acc_data in accounts.items():
                 label = " - ".join(x for x in (acc_data.get("bank"), acc_data.get("account")) if x) or acc_key
-                render_account_view(acc_data["rows"], acc_data.get("summary", {}), label=label)
+                render_account_view(
+                    acc_data["rows"],
+                    acc_data.get("summary", {}),
+                    audit_result=acc_data.get("audit_result"),
+                    label=label,
+                )
         else:
-            render_account_view(result["rows"], result.get("summary", {}))
+            render_account_view(
+                result["rows"],
+                result.get("summary", {}),
+                audit_result=result.get("audit_result"),
+            )
 
         json_payload = {
             "document_year": year,
             "summary": result.get("summary"),
             "accounts": {
-                k: {**v, "rows": [serialize_row(r) for r in v.get("rows", [])]}
+                k: {
+                    "account": v.get("account"),
+                    "bank": v.get("bank"),
+                    "document_year": v.get("document_year"),
+                    "summary": v.get("summary"),
+                    "rows": [serialize_row(r) for r in v.get("rows", [])],
+                }
                 for k, v in accounts.items()
             },
             "pages": result["pages"],
@@ -175,5 +217,4 @@ if uploaded_files and st.button("Extract", type="primary"):
         with st.expander("Page diagnostics"):
             st.json(result["pages"])
     except Exception as exc:
-        logger.exception("Extraction failed after %.3f seconds", time.perf_counter() - started_at)
         st.error(str(exc))

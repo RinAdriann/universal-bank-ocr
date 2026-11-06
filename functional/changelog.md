@@ -1,5 +1,22 @@
 # Indonesian Bank Statement OCR - Changelog
 
+## Update-004
+**Description:** Multi-Signal Consensus, Digital PDF Forensics, Stateless Page Extraction, Checkpoint Bucket Reconciler & Callable Audit UI (Spec 003)
+**Date:** 2026-11-05 15:45 WIB
+**Changelog:**
+- **Global Variable & Schema Humanization (`component/structures.py`, `component/parser.py`, `component/export.py`):** Standardized accounting and domain field names (`detected_amount`, `assigned_column`, `printed_balance`, `computed_balance`, `balance_discrepancy`, `is_reconciled`, `has_printed_balance`, `row_top_y`, `checkpoint_balance`, `clean_description`, `counterparty_name`, `transaction_index`) with backward-compatible property aliases, plus `extract_clean_description` and `extract_counterparty_name` helpers.
+- **Stateless Page Extraction, Dynamic X-Density Projection & 4-Tier Date Cascade (`component/ocr.py`, `component/parser.py`, `component/layout.py`):** Added native `PyMuPDF` vector word/span extraction (`words_pymupdf`, `spans_pymupdf`) with cold `RapidOCR` fallback, per-page header/footer fingerprinting (`PageFingerprint`, `extract_page_fingerprint`), 1D X-axis density histogram (`build_x_density_histogram`), date-anchor row banding (`build_date_row_bands`), and the 4-tier date inheritance cascade (`apply_dates`) resolving full dates, partial `DD/MM` dates (with Dec $\rightarrow$ Jan rollover), look-ahead dates for dateless `SALDO AWAL` rows (`YYYY-MM-01`), and look-behind dates for continuation rows.
+- **Multi-Signal Consensus Extraction (`component/consensus.py`):** Created `component/consensus.py` evaluating Signal 1 Geometric ($x_1$ right-edge lock & vertical row band), Signal 2 Structural (PDF vector span continuity, direction markers, dominant font profile via `build_dominant_font_profile`, and `detect_overlaid_spans`), and Signal 3 Lexical (`validate_financial_grammar`, `has_alpha_contamination`) into `HIGH`, `MEDIUM`, `EXTRACTION_CONFLICT`, or `OVERLAID_TEXT`.
+- **Multi-Account Partitioning, Page Deduplication & Topological Re-Ordering (`component/extractor.py`):** Partitioned pages by `account_number`, deduplicated repeated pages via transaction tuple hashing (`DUPLICATE_PAGE_DROPPED`), and topologically sorted pages and rows by `(statement_year, statement_month, printed_page_number, pdf_page_index, row_top_y)` before assigning sequential `transaction_index` ($0 \dots N$).
+- **Checkpoint & Bucket Reconciler & Digital PDF Forensics (`component/audit.py`, `component/forensics.py`, `component/balancecalc.py`):** Created `component/audit.py` (`audit_ledger`) with bucket accumulation (`VERIFIED_BY_BUCKET`) for BCA intermediate rows missing `printed_balance`, non-destructive `BALANCE_MISMATCH` logging at `transaction_index`, `computed_balance = printed_balance` reset after discrepancies so a single bad row never cascades, and cross-month continuity checks (`MISSING_PERIOD_OR_CONTINUITY_GAP`). Created `component/forensics.py` (`run_forensic_audit`) detecting `SUSPICIOUS_PDF_PRODUCER`, `METADATA_MODIFIED`, `FONT_ANOMALY`, and `OVERLAID_TEXT`.
+- **Callable Audit State, Single-Line Logger & Streamlit Audit UI (`component/structures.py`, `app.py`):** Added `AuditIssue` and `StatementAuditResult` (`issues_df`, `summary_line()`), replaced noisy per-row logs with a single tab-aligned console summary line per statement stream, and updated `app.py` with a top-level reconciliation status banner and collapsible `View Audit Issues & Discrepancies` table.
+
+**Artifacts & Documentation Index:**
+- [Spec 003 Overview](./specs/003_consensus_forensic_reconciler/README.md)
+- [Implementation Plan](./specs/003_consensus_forensic_reconciler/plan.md)
+- [Task Checklist](./specs/003_consensus_forensic_reconciler/task.md)
+- [Verification Walkthrough](./specs/003_consensus_forensic_reconciler/walkthrough.md)
+
 ## Update-003
 **Description:** Camera-Photo Detection, Illumination Normalization, Strip-Slope Dewarping & Blurry-OCR Resilience (Spec 002)
 **Date:** 2026-10-22 08:20 WIB

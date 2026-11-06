@@ -26,18 +26,17 @@ def format_date(dt: Any) -> str:
         return dt.strftime("%d/%m/%Y")
     return str(dt)
 
-def _safe_str(val: Any) -> str:
-    s = "" if val is None else str(val)
-    return f"'{s}" if s.startswith(("=", "+", "-", "@")) else s
 
 def transaction_record(row: Any, format_dt: bool = False, escape_excel: bool = True) -> dict[str, Any]:
     desc = safe_str(row.description) if escape_excel else (row.description or "")
     dt_val = format_date(row.date) if format_dt else (row.date if row.date is not None else "")
+    printed_bal = getattr(row, "printed_balance", None)
+    bal_val = printed_bal if printed_bal is not None else row.balance
     return {
         "Tanggal": dt_val,
         "Kredit": row.credit,
         "Debit": row.debit,
-        "Saldo": row.balance,
+        "Saldo": bal_val,
         "Deskripsi": desc,
         "Kategori Transaksi": category(row.description, row.debit, row.credit),
     }
@@ -45,17 +44,26 @@ def transaction_record(row: Any, format_dt: bool = False, escape_excel: bool = T
 
 def rows_df(rows: list[Any], format_dt: bool = True, escape_excel: bool = False) -> pd.DataFrame:
     records = [transaction_record(r, format_dt=format_dt, escape_excel=escape_excel) for r in rows]
-    return pd.DataFrame(records, columns=DETAIL_COLS)
+    idx = [getattr(r, "transaction_index", i) for i, r in enumerate(rows)]
+    df = pd.DataFrame(records, index=idx if rows else None, columns=DETAIL_COLS)
+    df.index.name = "transaction_index"
+    return df
 
 
 def review_df(rows: list[Any], detailed: bool = True, escape_excel: bool = False) -> pd.DataFrame:
     records = []
-    for row in rows:
+    idx_list = []
+    for i, row in enumerate(rows):
+        tx_idx = getattr(row, "transaction_index", i)
+        idx_list.append(tx_idx)
         raw = safe_str(row.raw_text) if escape_excel else (row.raw_text or "")
         flags = ", ".join(row.validation)
         if detailed:
             records.append({
+                "transaction_index": tx_idx,
                 "Halaman": row.page,
+                "Extraction confidence": getattr(row, "extraction_confidence", "HIGH"),
+                "Reconciliation status": getattr(row, "reconciliation_status", "UNVERIFIED"),
                 "Confidence": round(getattr(row, "confidence", 1.0), 3),
                 "Human review status": "Needs review" if row.validation else "Pending review",
                 "Validation flags": flags,
@@ -68,7 +76,9 @@ def review_df(rows: list[Any], detailed: bool = True, escape_excel: bool = False
                 "Full detected text": raw,
             })
     cols = None if detailed else REVIEW_COLS
-    return pd.DataFrame(records, columns=cols)
+    df = pd.DataFrame(records, index=idx_list if rows else None, columns=cols)
+    df.index.name = "transaction_index"
+    return df
 
 
 def serialize_row(row: Any) -> dict[str, Any]:
@@ -77,6 +87,7 @@ def serialize_row(row: Any) -> dict[str, Any]:
     item.pop("date_parts", None)
     item.pop("time", None)
     item.pop("pending_dir", None)
+    item.pop("numeric_profiles", None)
     return item
 
 
@@ -99,7 +110,10 @@ def month_label(ym: tuple[int, int]) -> str:
 def saldo_mengendap(rows: list[Any]) -> dict[tuple[int, int], list[tuple[Any, float]]]:
     by_day: dict[Any, list[Any]] = {}
     for row in rows:
-        if getattr(row, "is_opening", False) or row.date is None or row.balance is None:
+        bal = getattr(row, "printed_balance", None)
+        if bal is None:
+            bal = row.balance
+        if getattr(row, "is_opening", False) or row.date is None or bal is None:
             continue
         if month_key(row.date):
             by_day.setdefault(row.date, []).append(row)
@@ -116,7 +130,10 @@ def saldo_mengendap(rows: list[Any]) -> dict[tuple[int, int], list[tuple[Any, fl
             )[1]
         else:
             last_row = day_rows[-1]
-        by_month.setdefault(ym, []).append((dt, float(last_row.balance)))
+        last_bal = getattr(last_row, "printed_balance", None)
+        if last_bal is None:
+            last_bal = last_row.balance
+        by_month.setdefault(ym, []).append((dt, float(last_bal)))
 
     for ym in by_month:
         by_month[ym].sort(key=lambda pair: pair[0] if isinstance(pair[0], date) else date.min)
@@ -146,7 +163,7 @@ def top5_monthly(rows: list[Any]) -> dict[tuple[int, int], dict[str, list[Any]]]
 def sheet_title(prefix: str, bank: str, acc: str, used: set[str]) -> str:
     clean_bank = re.sub(r"[\[\]:*?/\\]", "", (bank or "").strip())
     clean_acc = re.sub(r"[\[\]:*?/\\]", "", (acc or "").strip())
-    if clean_acc in ("Default", "Unknown"):
+    if clean_acc in ("Default", "Unknown", "UNKNOWN_ACCOUNT"):
         clean_acc = ""
 
     if clean_bank and clean_acc:

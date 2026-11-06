@@ -1,6 +1,39 @@
+import os
 import re
 
-TOL = 0.51
+AUDIT_TOL = float(os.getenv("BANK_OCR_AUDIT_TOL", "0.05"))
+TOL = AUDIT_TOL
+
+DEFAULT_DPI = int(os.getenv("BANK_OCR_DPI", "220"))
+HEADER_DPI = int(os.getenv("BANK_OCR_HEADER_DPI", "180"))
+HEADER_RATIO = float(os.getenv("BANK_OCR_HEADER_RATIO", "0.3"))
+MAX_UPLOAD_MB = int(os.getenv("BANK_OCR_MAX_UPLOAD_MB", "50"))
+
+EXTRACTION_CONFIDENCE_HIGH = "HIGH"
+EXTRACTION_CONFIDENCE_MEDIUM = "MEDIUM"
+EXTRACTION_CONFIDENCE_LOW = "LOW"
+EXTRACTION_CONFIDENCE_CONFLICT = "EXTRACTION_CONFLICT"
+EXTRACTION_CONFIDENCE_OVERLAID = "OVERLAID_TEXT"
+
+SUSPICIOUS_PDF_EDITORS = (
+    "canva",
+    "acrobat",
+    "sejda",
+    "ilovepdf",
+    "foxit",
+    "nitro",
+    "smallpdf",
+    "pdfescape",
+    "phantompdf",
+    "libreoffice",
+    "wps",
+    "pdf24",
+    "sodapdf",
+    "master pdf",
+    "inkscape",
+    "illustrator",
+    "coreldraw",
+)
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 SUPPORTED_INPUT_SUFFIXES = {".pdf"} | IMAGE_SUFFIXES
@@ -9,9 +42,15 @@ ALLOWED_EXTS = [ext.lstrip(".") for ext in sorted(SUPPORTED_INPUT_SUFFIXES)]
 DETAIL_COLS = ["Tanggal", "Kredit", "Debit", "Saldo", "Deskripsi", "Kategori Transaksi"]
 REVIEW_COLS = ["Halaman", "Validation flags", "Full detected text"]
 
+MONTH_MAP = {
+    "JAN": 1, "PEB": 2, "FEB": 2, "MAR": 3, "APR": 4, "MEI": 5, "MAY": 5,
+    "JUN": 6, "JUL": 7, "AGU": 8, "AGT": 8, "AUG": 8, "SEP": 9,
+    "OKT": 10, "OCT": 10, "NOP": 11, "NOV": 11, "DES": 12, "DEC": 12,
+}
+
 MONTHS = {
     "jan": 1, "januari": 1, "january": 1,
-    "feb": 2, "pebruari": 2, "februari": 2, "february": 2,
+    "peb": 2, "feb": 2, "pebruari": 2, "februari": 2, "february": 2,
     "mar": 3, "maret": 3, "march": 3,
     "apr": 4, "april": 4,
     "mei": 5, "may": 5,
@@ -20,7 +59,7 @@ MONTHS = {
     "agu": 8, "agt": 8, "agustus": 8, "aug": 8, "august": 8,
     "sep": 9, "sept": 9, "september": 9,
     "okt": 10, "oktober": 10, "oct": 10, "october": 10,
-    "nov": 11, "nopember": 11, "november": 11,
+    "nop": 11, "nov": 11, "nopember": 11, "november": 11,
     "des": 12, "desember": 12, "dec": 12, "december": 12,
 }
 
@@ -40,7 +79,12 @@ WEEKDAY_RE = re.compile(
 GLUED_TIME_RE = re.compile(
     r"^(\d{1,4}[/\-.\s]*(?:\d{1,2}|[A-Za-z]{3,9})\.?[/\-.\s,]*((?:19|20)\d{2}|\d{2})?|"
     r"[A-Za-z]{3,9}\.?[\s/\-.,]*\d{1,2}(?:[\s/\-.,]+(?:(?:19|20)\d{2}|\d{2}))?)"
-    r"([01]\d|2[0-3]|\d)(?=:[0-5]\d|\b)"
+    r"([01]\d|2[0-3]|\d)(?=[:.][0-5]\d|\b)"
+)
+
+TRAILING_TIMESTAMP_RE = re.compile(
+    r"\s+\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s*(?:AM|PM|WIB|WITA|WIT))?",
+    re.IGNORECASE,
 )
 
 TIME_RE = re.compile(
@@ -55,11 +99,16 @@ PURE_TIME_RE = re.compile(
 
 ALPHA_DATE_RE = re.compile(
     rf"^(?:(\d{{1,4}})[\s/\-.,]*({MONTH_ALT})(?![A-Za-z])\.?(?:[\s/\-.,]*(\d{{1,4}}(?![\d:.])))?|"
-    rf"({MONTH_ALT})(?![A-Za-z])\.?[\s/\-.,]*(\d{{1,4}}(?![\d:.]))(?:[\s/\-.,]+(\d{{1,4}}(?![\d:.])))?)(?![\d,])",
+    rf"({MONTH_ALT})(?![A-Za-z])\.?[\s/\-.,]*(\d{{1,4}}(?![\d:.]))(?:[\s/\-.,]+(\d{{1,4}}(?![\d:.])))?)(?![\d,])"
+    r"(?:\s+\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s*(?:AM|PM|WIB|WITA|WIT))?)?",
     re.IGNORECASE,
 )
 
-NUM_DATE_RE = re.compile(r"^(\d{1,4})([/\-.])(\d{1,2})(?:\2(\d{1,4}))?(?![\d,])")
+NUM_DATE_RE = re.compile(
+    r"^(\d{1,4})([/\-.])(\d{1,2})(?:\2(\d{1,4}))?(?![\d,])"
+    r"(?:\s+\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s*(?:AM|PM|WIB|WITA|WIT))?)?",
+    re.IGNORECASE,
+)
 
 ACCOUNT_RE = re.compile(
     r"(?:NO(?:MOR|\.)?\s*(?:REK(?:ENING|\.)?|ACC(?:OUNT|\.)?|AC\b)|"
@@ -80,19 +129,21 @@ OPENING_RE = re.compile(
 )
 
 STOP_RE = re.compile(
-    r"^\W*(TOTAL\b|JUMLAH\s+(?:MUTASI|DEBET|DEBIT|KREDIT|CREDIT)|SALDO\s+AKHIR|CLOSING\s+BALANCE|ENDING\s+BALANCE|"
-    r"SALDO\s+AWAL|OPENING\s+BALANCE|SALDO\s+REKENING|HALAMAN\b|PAGE\b|BERSAMBUNG|CONTINUED|CREATED\s+BY|TERBILANG|"
+    r"^\W*(TOTAL\b|JUMLAH\s+(?:MUTASI|DEBET|DEBIT|KREDIT|CREDIT)|"
+    r"SALDO\s+AWAL|OPENING\s+BALANCE|HALAMAN\b|PAGE\b|BERSAMBUNG|CONTINUED|CREATED\s+BY|TERBILANG|"
     r"APABILA|DICETAK|PRINTED|MUTASI\s+(?:DEBET|DEBIT|KREDIT|CREDIT)|\*+\s*(?:AKHIR|END))",
     re.IGNORECASE,
 )
 
 DEBIT_HINT_RE = re.compile(
     r"\b(TARIK|TARIKAN|PENARIKAN|WITHDRAWAL|OUTGOING|BIAYA|ADM|ADMIN|FEE|PAJAK|"
-    r"PEMBAYARAN|BAYAR|PEMBELIAN|TRANSAKSI|DEBIT|DB|TRANSFER KE|TRF KE|TRSF KE|TRF|TRSF|KE)\b"
+    r"PEMBAYARAN|BAYAR|PEMBELIAN|TRANSAKSI|DEBIT|DB|TRANSFER KE|TRF KE|TRSF KE|"
+    r"TRANSFER OUT|TRSF OUT|(?:TRANSFER|TRF|TRSF)(?!\s+(?:DARI|IN|MASUK|CR|KR))|KE)\b"
 )
 CREDIT_HINT_RE = re.compile(
     r"\b(SETOR|SETORAN|BUNGA|INTEREST|JASA GIRO|BAGI HASIL|KREDIT|CREDIT|KR|CR|"
-    r"INCOMING|DEPOSIT|RECEIVED|REFUND|GAJI|SALARY|TRANSFER DARI|TRSF DARI|TRF DARI|DARI)\b"
+    r"INCOMING|DEPOSIT|RECEIVED|REFUND|GAJI|SALARY|TRANSFER DARI|TRSF DARI|TRF DARI|"
+    r"TRANSFER IN|TRSF IN|DARI)\b"
 )
 
 CATEGORY_RULES = [
@@ -121,5 +172,44 @@ ALL_ROLE_WORDS = sorted({k for _, keys in ROLE_KEYS for k in keys if len(k) >= 5
 
 MONEY_RE = re.compile(
     r"^[+\-]?\(?(?:\d{1,4}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{1,3}[.,]\d{6}[.,]\d{1,2}|\d+[.,]\d{1,2})\)?(?:DB|DR|CR|D|K|C|[+\-])?$"
+    r"|^[+\-]\d{4,15}(?:DB|DR|CR|D|K|C)?$"
 )
-INT_RE = re.compile(r"^[+\-]?\d{1,13}(?:DB|DR|CR|D|K|C)?$")
+INT_RE = re.compile(r"^[+\-]?\d{1,15}(?:DB|DR|CR|D|K|C)?$")
+
+DIRECTION_MARKER_RE = re.compile(r"^(DB|DR|CR|D|K|C|\+|-)$", re.IGNORECASE)
+
+TABLE_HEADER_KEYWORDS = {
+    "TANGGAL", "TGL", "DATE", "WAKTU", "TANGGAL/WAKTU", "TGL/WAKTU", "VALUTA",
+    "URAIAN", "KETERANGAN", "DESKRIPSI", "DESCRIPTION", "REMARK", "REMARKS",
+    "NARASI", "BERITA", "PARTICULARS", "DETAIL", "DETAILS",
+    "MUTASI", "JUMLAH", "NOMINAL", "AMOUNT", "NILAI",
+    "DEBET", "DEBIT", "KELUAR", "PENGELUARAN", "WITHDRAWAL", "WITHDRAWALS",
+    "KREDIT", "CREDIT", "MASUK", "PEMASUKAN", "DEPOSIT", "DEPOSITS",
+    "SALDO", "BALANCE", "SAIDO", "SUDO", "SADO",
+}
+
+SUMMARY_INTERCEPT_TOKENS = (
+    "MUTASIDEBET",
+    "MUTASIDEBIT",
+    "MUTASIKREDIT",
+    "MUTASICREDIT",
+    "TOTALMUTASI",
+    "JUMLAHMUTASI",
+    "TOTALDEBET",
+    "TOTALDEBIT",
+    "TOTALKREDIT",
+    "TOTALCREDIT",
+    "JUMLAHDEBET",
+    "JUMLAHDEBIT",
+    "JUMLAHKREDIT",
+    "JUMLAHCREDIT",
+    "SUBTOTAL",
+    "TOTAL",
+    "JUMLAH",
+)
+
+FOOTER_BOILERPLATE_RE = re.compile(
+    r"^\W*(HALAMAN\b|PAGE\b|BERSAMBUNG|CONTINUED|CREATED\s+BY|TERBILANG|"
+    r"APABILA|DICETAK|PRINTED|\*+\s*(?:AKHIR|END))",
+    re.IGNORECASE,
+)
