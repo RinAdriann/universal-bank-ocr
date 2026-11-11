@@ -39,8 +39,8 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 SUPPORTED_INPUT_SUFFIXES = {".pdf"} | IMAGE_SUFFIXES
 ALLOWED_EXTS = [ext.lstrip(".") for ext in sorted(SUPPORTED_INPUT_SUFFIXES)]
 
-DETAIL_COLS = ["Tanggal", "Kredit", "Debit", "Saldo", "Deskripsi", "Kategori Transaksi"]
-REVIEW_COLS = ["Halaman", "Validation flags", "Full detected text"]
+DETAIL_COLS = ["Tanggal", "Kredit", "Debit", "Saldo", "Deskripsi", "Pihak Terkait", "No. Referensi", "Kategori Transaksi"]
+REVIEW_COLS = ["Halaman", "Pihak Terkait", "No. Referensi", "Validation flags", "Full detected text"]
 
 MONTH_MAP = {
     "JAN": 1, "PEB": 2, "FEB": 2, "MAR": 3, "APR": 4, "MEI": 5, "MAY": 5,
@@ -129,7 +129,8 @@ OPENING_RE = re.compile(
 )
 
 STOP_RE = re.compile(
-    r"^\W*(TOTAL\b|JUMLAH\s+(?:MUTASI|DEBET|DEBIT|KREDIT|CREDIT)|"
+    r"^\W*(TOTAL\s+(?:MUTASI|DEBET|DEBIT|KREDIT|CREDIT|SALDO|TRANSAKSI|SETORAN|PENARIKAN)\b|"
+    r"JUMLAH\s+(?:MUTASI|DEBET|DEBIT|KREDIT|CREDIT)|"
     r"SALDO\s+AWAL|OPENING\s+BALANCE|HALAMAN\b|PAGE\b|BERSAMBUNG|CONTINUED|CREATED\s+BY|TERBILANG|"
     r"APABILA|DICETAK|PRINTED|MUTASI\s+(?:DEBET|DEBIT|KREDIT|CREDIT)|\*+\s*(?:AKHIR|END))",
     re.IGNORECASE,

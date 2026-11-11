@@ -29,6 +29,8 @@ def format_date(dt: Any) -> str:
 
 def transaction_record(row: Any, format_dt: bool = False, escape_excel: bool = True) -> dict[str, Any]:
     desc = safe_str(row.description) if escape_excel else (row.description or "")
+    counterparty = safe_str(getattr(row, "counterparty_name", "")) if escape_excel else (getattr(row, "counterparty_name", "") or "")
+    ref = safe_str(getattr(row, "reference", "")) if escape_excel else (getattr(row, "reference", "") or "")
     dt_val = format_date(row.date) if format_dt else (row.date if row.date is not None else "")
     printed_bal = getattr(row, "printed_balance", None)
     bal_val = printed_bal if printed_bal is not None else row.balance
@@ -38,6 +40,8 @@ def transaction_record(row: Any, format_dt: bool = False, escape_excel: bool = T
         "Debit": row.debit,
         "Saldo": bal_val,
         "Deskripsi": desc,
+        "Pihak Terkait": counterparty,
+        "No. Referensi": ref,
         "Kategori Transaksi": category(row.description, row.debit, row.credit),
     }
 
@@ -57,11 +61,15 @@ def review_df(rows: list[Any], detailed: bool = True, escape_excel: bool = False
         tx_idx = getattr(row, "transaction_index", i)
         idx_list.append(tx_idx)
         raw = safe_str(row.raw_text) if escape_excel else (row.raw_text or "")
+        counterparty = safe_str(getattr(row, "counterparty_name", "")) if escape_excel else (getattr(row, "counterparty_name", "") or "")
+        ref = safe_str(getattr(row, "reference", "")) if escape_excel else (getattr(row, "reference", "") or "")
         flags = ", ".join(row.validation)
         if detailed:
             records.append({
                 "transaction_index": tx_idx,
                 "Halaman": row.page,
+                "Pihak Terkait": counterparty,
+                "No. Referensi": ref,
                 "Extraction confidence": getattr(row, "extraction_confidence", "HIGH"),
                 "Reconciliation status": getattr(row, "reconciliation_status", "UNVERIFIED"),
                 "Confidence": round(getattr(row, "confidence", 1.0), 3),
@@ -72,6 +80,8 @@ def review_df(rows: list[Any], detailed: bool = True, escape_excel: bool = False
         else:
             records.append({
                 "Halaman": row.page,
+                "Pihak Terkait": counterparty,
+                "No. Referensi": ref,
                 "Validation flags": flags,
                 "Full detected text": raw,
             })
@@ -303,7 +313,7 @@ def excel_bytes(result: dict[str, Any]) -> bytes:
 
                 ws = writer.sheets[sname]
                 ws.freeze_panes = "A2"
-                for col, width in zip(["A", "B", "C", "D", "E", "F"], [14, 16, 16, 16, 80, 22]):
+                for col, width in zip(["A", "B", "C", "D", "E", "F", "G", "H"], [14, 16, 16, 16, 80, 28, 22, 22]):
                     ws.column_dimensions[col].width = width
                 for excel_row in ws.iter_rows(min_row=2):
                     if isinstance(excel_row[0].value, (date, datetime)):
@@ -321,7 +331,7 @@ def excel_bytes(result: dict[str, Any]) -> bytes:
             review_df(acc_rows, detailed=False, escape_excel=True).to_excel(writer, sheet_name=rev_name, index=False)
             rev_ws = writer.sheets[rev_name]
             rev_ws.freeze_panes = "A2"
-            for col, width in zip(["A", "B", "C"], [10, 28, 100]):
+            for col, width in zip(["A", "B", "C", "D", "E"], [10, 28, 22, 28, 100]):
                 rev_ws.column_dimensions[col].width = width
 
     return output.getvalue()

@@ -14,3 +14,4 @@ __pycache__/
 /reference
 /output
 node_modules/
+optimizer.pt

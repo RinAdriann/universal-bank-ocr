@@ -30,6 +30,7 @@ from .constants import (
     SUMMARY_INTERCEPT_TOKENS,
     TABLE_HEADER_KEYWORDS,
 )
+from .ner import get_transaction_ner
 from .parser import (
     clean_text,
     description_direction,
@@ -1245,6 +1246,17 @@ def process_page(
         or EXTRACTION_CONFIDENCE_CONFLICT in r.validation
         or EXTRACTION_CONFIDENCE_OVERLAID in r.validation
     ]
+
+    if kept:
+        ner_inputs = [
+            "" if r.is_opening else " ".join(filter(None, (r.description, r.extra)))
+            for r in kept
+        ]
+        ner_results = get_transaction_ner().extract_batch(ner_inputs)
+        for r, ner_res, full_desc in zip(kept, ner_results, ner_inputs):
+            if not r.is_opening:
+                r.counterparty_name = ner_res["counterparty"] or extract_counterparty_name(full_desc)
+                r.reference = ner_res["reference"] or r.reference
 
     page_years = [r.date_parts[2] for r in kept if r.date_parts and len(r.date_parts) >= 3 and r.date_parts[2]]
     effective_year = (

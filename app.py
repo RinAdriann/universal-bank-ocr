@@ -117,8 +117,15 @@ def render_account_view(
         st.dataframe(review_df(rows), width="stretch", hide_index=True)
 
 
+@st.cache_resource
+def get_ner():
+    from component.ner import TransactionNER
+    return TransactionNER()
+
+
 st.set_page_config(page_title="Indonesian Bank Statement Extractor", layout="wide")
 st.title("PDF/Image to Excel")
+get_ner()
 
 uploaded_files = st.file_uploader(
     "Upload PDF or statement image(s)",
