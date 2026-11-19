@@ -26,6 +26,20 @@ Indonesian Bank Statement OCR is a local extraction, multi-signal consensus, for
 | **001** | Core Extraction Pipeline Audit, Deduplication & Refactoring | Completed | `specs/001_pipeline_audit_refactor/` |
 | **002** | Camera-Photo Detection, Illumination Normalization & Strip-Slope Dewarping | Completed | `specs/002_camera_photo_preprocess/` |
 | **003** | Multi-Signal Consensus, Digital PDF Forensics, Checkpoint Bucket Reconciler & Callable Audit UI | Completed | `specs/003_consensus_forensic_reconciler/` |
+| **004** | Executive Credit Memo Summary Sheet (`00_RINGKASAN`) & NER Counterparty Ranking | Completed | `specs/004_credit_memo_summary_sheet/` |
+
+### Spec 004 — Executive Credit Memo Summary Sheet (`specs/004_credit_memo_summary_sheet/`)
+**Fokus:** Automate multi-account portfolio summaries, monthly turnover matrices (`MD`, `MK`, `Pengendapan`, `Saldo Akhir`), transaction category distributions, and NER-powered top counterparty (`Pihak Terkait`) rankings into a formula-driven `00_RINGKASAN` sheet at index 0 of the Excel export and an executive preview in Streamlit.
+
+#### Functional Requirements (Spec 004)
+| ID | Fitur | Deskripsi Detail | Status |
+| --- | --- | --- | --- |
+| **FR-13** | Executive Credit Memo Aggregator (`component/memo.py`) | Compute `calculate_monthly_metrics`, `calculate_category_breakdown`, and `calculate_top_counterparties` in `< 50 ms` on post-NER `ExtractedRow` streams while excluding `is_opening` rows from turnover totals. | Completed |
+| **FR-14** | Formula-Driven `00_RINGKASAN` Worksheet & UI Preview | Insert `00_RINGKASAN` at sheet index 0 with dynamic `=SUM()`, `=AVERAGE()`, and difference formulas across 4 analytical sections, plus `render_memo_summary` in `app.py`. | Completed |
+
+#### Execution Steps (Spec 004)
+* [x] **Analytical Module & Excel Formula Builder:** Implement `component/memo.py` and integrate into `component/export.py` (`specs/004_credit_memo_summary_sheet/plan.md`).
+* [x] **Streamlit UI Executive Preview & Verification:** Add `render_memo_summary` in `app.py` and verify `< 50 ms` latency and formula integrity (`specs/004_credit_memo_summary_sheet/walkthrough.md`).
 
 ### Spec 003 — Multi-Signal Consensus, Digital PDF Forensics, Checkpoint Bucket Reconciler & Callable Audit UI (`specs/003_consensus_forensic_reconciler/`)
 **Fokus:** Upgrade the extraction and verification pipeline with humanized accounting schemas, stateless page extraction, 4-tier date resolution, 3-signal numeric consensus, out-of-order/duplicate page topological re-sequencing, checkpoint/bucket balance reconciliation (handling BCA omitted `Saldo`), digital PDF tampering forensics, single-line console logging, and a clean Streamlit audit UI.

@@ -8,17 +8,8 @@ import pandas as pd
 import streamlit as st
 
 from component import excel_bytes, extract_statement
-from component.structures import StatementAuditResult
-from component.constants import ALLOWED_EXTS
-from component.export import (
-    format_date,
-    month_label,
-    review_df,
-    rows_df,
-    saldo_mengendap,
-    serialize_row,
-    top5_monthly,
-)
+from component.core import ALLOWED_EXTS, StatementAuditResult
+from component.report import build_portfolio_overview_df, calculate_account_counterparty_recap, calculate_monthly_metrics, collapse_saldo_streaks, format_date, get_account_holder_name, month_label, review_df, rows_df, saldo_mengendap, serialize_row, top5_monthly
 
 ISSUE_DISPLAY_COLS = [
     "transaction_index",
@@ -65,9 +56,10 @@ def render_analytics(rows: list, suffix: str = "") -> None:
             for idx, (ym, items) in enumerate(sm_data.items()):
                 with cols[idx % len(cols)]:
                     st.caption(f"Saldo Mengendap — {month_label(ym)}")
+                    streaks = collapse_saldo_streaks(items)
                     df = pd.DataFrame(
-                        [(format_date(dt), bal) for dt, bal in items],
-                        columns=["Tanggal", "Saldo Mengendap"],
+                        [(format_date(dt), bal, count, round(bal * count, 2)) for dt, bal, count in streaks],
+                        columns=["Tanggal", "Saldo Mengendap", "Count", "Total"],
                     )
                     st.dataframe(df, width="stretch", hide_index=True)
 
@@ -88,6 +80,73 @@ def render_analytics(rows: list, suffix: str = "") -> None:
                         columns=["Tanggal", "Debit", "Deskripsi"],
                     )
                     st.dataframe(db_df, width="stretch", hide_index=True)
+
+
+def render_memo_summary(result: dict) -> None:
+    with st.expander("Executive Credit Memo Summary", expanded=True):
+        overview_df = build_portfolio_overview_df(result)
+        st.caption("Portfolio Multi-Account Overview")
+        st.dataframe(overview_df, width="stretch", hide_index=True)
+
+        all_rows = result.get("rows", [])
+        m_metrics = calculate_monthly_metrics(all_rows)
+        if m_metrics:
+            st.caption("Monthly Turnover & Net Cash Flow (MK - MD)")
+            m_df = pd.DataFrame(
+                [
+                    {
+                        "Periode": v["label"],
+                        "Mutasi Debet (MD)": v["md"],
+                        "Mutasi Kredit (MK)": v["mk"],
+                        "Selisih (MK - MD)": v["selisih"],
+                        "Rata-rata Pengendapan": v["pengendapan"],
+                        "Saldo Akhir (SA)": v["sa"],
+                        "Jumlah Transaksi": v["tx_count"],
+                    }
+                    for v in m_metrics.values()
+                ]
+            )
+            st.dataframe(m_df, width="stretch", hide_index=True)
+
+        accounts_map = result.get("accounts")
+        acc_groups = (
+            [
+                (
+                    v.get("bank") or "-",
+                    v.get("account") or "-",
+                    get_account_holder_name(v, default="-"),
+                    v.get("rows", []),
+                )
+                for v in accounts_map.values()
+            ]
+            if accounts_map
+            else [("-", "-", get_account_holder_name(result, default="-"), all_rows)]
+        )
+
+        for bank_name, acc_no, holder, acc_rows in acc_groups:
+            header_tag = f"{bank_name}, {acc_no} ({holder})"
+            col_md, col_mk = st.columns(2)
+            for col_obj, flow_title, is_cr in (
+                (col_md, f"Rekapan Transaksi MD — {header_tag}", False),
+                (col_mk, f"Rekapan Transaksi MK — {header_tag}", True),
+            ):
+                recap = calculate_account_counterparty_recap(acc_rows, is_credit=is_cr, top_n=None)
+                months = recap["months"]
+                m_labels = [month_label(ym) for ym in months]
+                rows_table = []
+                for item in recap["items"]:
+                    r_dict: dict = {"Pihak Terkait": item["counterparty"]}
+                    for ym, m_lbl in zip(months, m_labels):
+                        r_dict[m_lbl] = item["monthly"].get(ym, 0.0)
+                    r_dict["Total Result"] = item["total"]
+                    rows_table.append(r_dict)
+                with col_obj:
+                    st.caption(flow_title)
+                    st.dataframe(
+                        pd.DataFrame(rows_table, columns=["Pihak Terkait"] + m_labels + ["Total Result"]),
+                        width="stretch",
+                        hide_index=True,
+                    )
 
 
 def render_account_view(
@@ -124,7 +183,7 @@ def get_ner():
 
 
 st.set_page_config(page_title="Indonesian Bank Statement Extractor", layout="wide")
-st.title("PDF/Image to Excel")
+st.title("PDF to Excel")
 get_ner()
 
 uploaded_files = st.file_uploader(
@@ -174,6 +233,8 @@ if uploaded_files and st.button("Extract", type="primary"):
             acc_label = ""
 
         st.success(f"Completed: {len(result['rows'])} transaction rows from {len(result['pages'])} pages{acc_label}{year_label}.")
+
+        render_memo_summary(result)
 
         if len(accounts) > 1:
             for acc_key, acc_data in accounts.items():

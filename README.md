@@ -22,7 +22,9 @@ component/ (Core Extraction, Consensus & Forensic Engine)
   forensics.py        -> audit forensik PDF digital (metadata editor konsumen, ModDate != CreationDate, anomali font, & teks tumpang-tindih)
   balancecalc.py      -> re-export kompatibilitas rekonsiliasi saldo dari audit.py
   transactioncat.py   -> kategorisasi transaksi otomatis & klasifikasi arus kas (flow)
-  export.py           -> serialisasi multi-sheet Excel (Detail, In, Out, Saldo Mengendap, Top 5, Review) berindeks transaction_index
+  ner.py              -> ekstraksi entitas bernama (Pihak Terkait & No. Referensi) berbasis BERT NER (CPU INT8)
+  memo.py             -> agregator & generator sheet ringkasan eksekutif kredit (00_RINGKASAN) berformula Excel dinamis
+  export.py           -> serialisasi multi-sheet Excel (00_RINGKASAN, Detail, In, Out, Saldo Mengendap, Top 5, Review) berindeks transaction_index
   structures.py       -> dataclass model internal (Word, Span, Cell, Line, Layout, PageFingerprint, RowBand, ConsensusResult, ExtractedRow, AuditIssue, StatementAuditResult)
   constants.py        -> kamus regex tanggal, aturan finansial, toleransi audit, daftar PDF editor mencurigakan, & aturan kategori
 ```

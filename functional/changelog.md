@@ -1,5 +1,19 @@
 # Indonesian Bank Statement OCR - Changelog
 
+## Update-005
+**Description:** Executive Credit Memo Summary Sheet (`00_RINGKASAN`) & Indonesian BERT NER Counterparty Integration (Spec 004)
+**Date:** 2026-11-11 15:00 WIB
+**Changelog:**
+- **Executive Credit Memo Aggregator (`component/memo.py`):** Created `component/memo.py` with `get_account_holder_name`, `calculate_monthly_metrics`, `calculate_category_breakdown`, `calculate_top_counterparties`, `build_portfolio_overview_df`, and `create_memo_sheet` / `create_sheet` (generating the index-0 `00_RINGKASAN` worksheet in `< 20 ms` with live `=SUM`, `=AVERAGE`, and `=MK-MD` formulas across Portfolio Overview, Per-Account Monthly Breakdown Matrix, Category Breakdown, and Top Counterparties).
+- **Excel Export & Streamlit Executive Preview (`component/export.py`, `app.py`):** Integrated `create_memo_sheet` at sheet index 0 in `excel_bytes(result)` and added `render_memo_summary(result)` (`Executive Credit Memo Summary` expander) in `app.py`.
+- **Indonesian BERT NER Engine (`component/ner.py`, `component/layout.py`):** Added CPU-optimized, quantized (`torch.qint8`) singleton `TransactionNER` (`extract_batch`) populating `counterparty_name` (`Pihak Terkait`) and `reference` (`No. Referensi`) with regex fallback.
+
+**Artifacts & Documentation Index:**
+- [Spec 004 Overview](./specs/004_credit_memo_summary_sheet/README.md)
+- [Implementation Plan](./specs/004_credit_memo_summary_sheet/plan.md)
+- [Task Checklist](./specs/004_credit_memo_summary_sheet/task.md)
+- [Verification Walkthrough](./specs/004_credit_memo_summary_sheet/walkthrough.md)
+
 ## Update-004
 **Description:** Multi-Signal Consensus, Digital PDF Forensics, Stateless Page Extraction, Checkpoint Bucket Reconciler & Callable Audit UI (Spec 003)
 **Date:** 2026-11-05 15:45 WIB

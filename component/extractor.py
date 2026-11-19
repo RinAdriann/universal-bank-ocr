@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 from collections import Counter
 from datetime import date, datetime
@@ -5,353 +7,46 @@ from pathlib import Path
 import re
 from typing import Any, Sequence
 
-from .audit import AUDIT_TOL, PENALTIES, audit_ledger, chain_matches, format_issue_date, row_month_pair
-from .constants import DEFAULT_DPI, SUPPORTED_INPUT_SUFFIXES
-from .export import excel_bytes, rows_df
-from .forensics import detect_overlaid_streams, run_forensic_audit
-from .layout import apply_dates, printed_totals, process_page
-from .ocr import (
+from component.core import (
+    AUDIT_TOL,
+    AuditIssue,
+    DEFAULT_DPI,
+    ExtractedRow,
+    SUPPORTED_INPUT_SUFFIXES,
+    State,
+    StatementAuditResult,
+    StatementSession,
+    apply_confidence,
+    emit_gap_pair,
+    iso_date,
+    make_issue,
+    normalize_reported_totals,
+)
+from component.report import excel_bytes, rows_df
+from component.ingest import (
+    detect_overlaid_streams,
     extract_header_info,
     get_pdf_sanitize_report,
     iter_pages,
     load_and_sanitize_pdf,
     ocr_fallback_single_page,
+    run_forensic_audit,
 )
-from .structures import AuditIssue, ExtractedRow, StatementAuditResult, StatementSession, State
-
-
-def has_internal_bucket_discrepancy(
-    page_rows: Sequence[ExtractedRow],
-    prev_closing_balance: float | None = None,
-) -> bool:
-    if not page_rows:
-        return False
-
-    def _check_sequence(seq: Sequence[ExtractedRow], start_bal: float | None) -> bool:
-        curr_bal = start_bal
-        net_fwd = 0.0
-        net_rev = 0.0
-        for r in seq:
-            if r.is_opening:
-                if r.printed_balance is not None:
-                    curr_bal = r.printed_balance
-                    net_fwd = 0.0
-                    net_rev = 0.0
-                continue
-            cr = r.credit or 0.0
-            db = r.debit or 0.0
-            if curr_bal is None:
-                if r.printed_balance is not None:
-                    curr_bal = r.printed_balance
-                continue
-            net_fwd += cr - db
-            net_rev += db - cr
-            if r.printed_balance is not None:
-                ok_fwd = abs((curr_bal + net_fwd) - r.printed_balance) <= AUDIT_TOL
-                ok_rev = abs((curr_bal + net_rev) - r.printed_balance) <= AUDIT_TOL
-                if not (ok_fwd or ok_rev):
-                    return True
-                curr_bal = r.printed_balance
-                net_fwd = 0.0
-                net_rev = 0.0
-        return False
-
-    return _check_sequence(page_rows, prev_closing_balance)
-
-
-def page_signature_hash(page_rows: Sequence[ExtractedRow]) -> int | None:
-    if not page_rows:
-        return None
-    tuples = tuple(
-        (
-            r.date.isoformat() if isinstance(r.date, (date, datetime)) else str(r.date or r.date_parts),
-            round(r.debit or 0.0, 2),
-            round(r.credit or 0.0, 2),
-            round((r.printed_balance if r.printed_balance is not None else r.balance) or 0.0, 2),
-            r.description,
-        )
-        for r in page_rows
-    )
-    return hash(tuples)
-
-
-def topological_sort_key(row: ExtractedRow, fallback_year: int | None) -> tuple:
-    st_year = row.statement_year
-    st_month = row.statement_month
-    if isinstance(row.date, (date, datetime)):
-        st_year = st_year or row.date.year
-        st_month = st_month or row.date.month
-    elif row.date_parts and len(row.date_parts) >= 2:
-        st_month = st_month or row.date_parts[1]
-        if len(row.date_parts) >= 3 and row.date_parts[2]:
-            st_year = st_year or row.date_parts[2]
-
-    st_year = st_year or fallback_year or 0
-    st_month = st_month or 0
-    printed_page = row.printed_page_number if row.printed_page_number is not None else row.pdf_page_index
-    opening_rank = 0 if (row.is_opening and row.row_top_y <= 0.0) else 1
-    return (
-        st_year,
-        st_month,
-        printed_page,
-        row.pdf_page_index,
-        opening_rank,
-        round(row.row_top_y, 2),
-    )
-
-
-def group_key_label(bank: str, acc: str) -> str:
-    clean_acc = "" if acc == "UNKNOWN_ACCOUNT" else acc
-    if bank and clean_acc:
-        return f"{bank} - {clean_acc}"
-    return bank or clean_acc or "Default"
-
-
-def dedupe_same_month_openings(rows: list[ExtractedRow]) -> list[ExtractedRow]:
-    kept: list[ExtractedRow] = []
-    seen_opening_months: set[tuple[int | None, int | None, float | None]] = set()
-    for row in rows:
-        if row.is_opening:
-            sig = (row.statement_year, row.statement_month, row.printed_balance)
-            if sig in seen_opening_months:
-                continue
-            seen_opening_months.add(sig)
-        kept.append(row)
-    return kept
-
-
-def order_page_bundles(
-    page_bundles: list[tuple[int, dict, list[ExtractedRow]]],
-    fallback_year: int | None,
-) -> list[tuple[int, dict, list[ExtractedRow]]]:
-    """Order page bundles when explicit printed page numbers indicate out-of-order pages within a statement."""
-    if len(page_bundles) <= 1:
-        return list(page_bundles)
-    has_printed_page_nums = any(diag.get("printed_page_number") is not None for _, diag, _ in page_bundles)
-    distinct_periods = {
-        (diag.get("statement_year"), diag.get("statement_month"))
-        for _, diag, _ in page_bundles
-        if diag.get("statement_month") is not None
-    }
-    if not has_printed_page_nums and len(distinct_periods) <= 1:
-        return list(page_bundles)
-
-    keyed: list[tuple[tuple[int, int, int, int], tuple[int, dict, list[ExtractedRow]]]] = []
-    last_y = fallback_year or 0
-    last_m = 0
-    for eff_page_idx, diag, p_rows in page_bundles:
-        py = diag.get("statement_year") or last_y
-        pm = diag.get("statement_month")
-        if pm is None:
-            first_r = next((r for r in p_rows if r.statement_month or r.date_parts), None)
-            if first_r is not None:
-                pm = first_r.statement_month or (first_r.date_parts[1] if first_r.date_parts and len(first_r.date_parts) >= 2 else None)
-        pm = pm if pm is not None else last_m
-        last_y, last_m = py, pm
-        p_num = diag.get("printed_page_number")
-        sort_p = p_num if p_num is not None else eff_page_idx
-        keyed.append(((py, pm, sort_p, eff_page_idx), (eff_page_idx, diag, p_rows)))
-
-    keyed.sort(key=lambda item: item[0])
-    return [item[1] for item in keyed]
-
-
-def slice_into_sessions(
-    page_bundles: Sequence[tuple[int, dict, list[ExtractedRow]]],
-    default_account: str = "UNKNOWN_ACCOUNT",
-) -> list[StatementSession]:
-    """Phase 4: In-Stream Session Slicing into StatementSession containers.
-
-    Spawns a new StatementSession on any of 3 Hard Seam Breaks:
-    1. Previous Session Sealed (current_session.is_sealed == True).
-    2. Opening Balance Reset (new SALDO AWAL / OPENING BALANCE row, or metadata_rect declares
-       a new Account Number or Statement Period).
-    3. Unaccounted Running Balance Jump at a repeating-header page boundary
-       (Prev Balance + Credit - Debit != Current Balance, tolerance > 0.05).
-    """
-    sessions: list[StatementSession] = []
-    current_session: StatementSession | None = None
-    last_printed_balance: float | None = None
-    prev_printed_page: int | None = None
-    prev_period_sig: tuple[Any, Any] | None = None
-
-    def _parse_iso_date(val: Any) -> date | None:
-        if isinstance(val, date):
-            return val
-        if isinstance(val, str) and val:
-            try:
-                return date.fromisoformat(val)
-            except ValueError:
-                return None
-        return None
-
-    def _spawn_session(diag: dict, initial_rows: list[ExtractedRow] | None = None) -> StatementSession:
-        nonlocal last_printed_balance
-        acc_num = diag.get("account_number") or diag.get("account") or default_account or "UNKNOWN_ACCOUNT"
-        p_start = _parse_iso_date(diag.get("statement_period_start"))
-        p_end = _parse_iso_date(diag.get("statement_period_end"))
-        open_bal = next((r.printed_balance for r in (initial_rows or []) if r.is_opening and r.printed_balance is not None), None)
-        sess = StatementSession(
-            account_number=acc_num,
-            period_start=p_start,
-            period_end=p_end,
-            opening_balance=open_bal,
-            closing_balance=None,
-            transactions=list(initial_rows or []),
-            reported_totals={},
-            is_sealed=False,
-            session_index=len(sessions),
-            pages=[diag.get("pdf_page_index", 1)],
-        )
-        sessions.append(sess)
-        last_printed_balance = None
-        for r in sess.transactions:
-            if r.printed_balance is not None:
-                last_printed_balance = r.printed_balance
-        return sess
-
-    for eff_page_idx, diag, p_rows in page_bundles:
-        rep_totals = dict(diag.get("reported_totals") or {})
-        page_sealed = bool(diag.get("is_sealed"))
-        has_header = bool(diag.get("header"))
-        cur_printed_page = diag.get("printed_page_number")
-        cur_period_sig = (diag.get("statement_year"), diag.get("statement_month"))
-
-        if not p_rows and not rep_totals:
-            continue
-
-        if current_session is None:
-            current_session = _spawn_session(diag)
-
-        # Check Hard Seam Breaks at page boundary when current_session already has data
-        if current_session.transactions or current_session.reported_totals:
-            seam_break = False
-
-            # Hard Seam Break 1: Previous session was sealed by a quarantined TOTAL / SALDO AKHIR line
-            if current_session.is_sealed:
-                seam_break = True
-
-            # Hard Seam Break 2: Opening balance reset or new declared Account / Statement Period in metadata_rect
-            if not seam_break:
-                if any(r.is_opening for r in p_rows[:1]):
-                    seam_break = True
-                elif (
-                    diag.get("page_declared_account")
-                    and current_session.account_number not in ("", "UNKNOWN_ACCOUNT")
-                    and diag["page_declared_account"] != current_session.account_number
-                ):
-                    seam_break = True
-                elif (
-                    has_header
-                    and diag.get("statement_period_start")
-                    and current_session.period_start is not None
-                    and diag.get("statement_period_start") != current_session.period_start.isoformat()
-                ):
-                    seam_break = True
-                elif (
-                    has_header
-                    and cur_period_sig[1] is not None
-                    and prev_period_sig is not None
-                    and prev_period_sig[1] is not None
-                    and cur_period_sig != prev_period_sig
-                ):
-                    seam_break = True
-
-            # Hard Seam Break 3: Unaccounted running balance jump at page boundary + repeating header
-            if not seam_break and has_header and last_printed_balance is not None and p_rows:
-                first_row = p_rows[0]
-                if not first_row.is_opening and first_row.printed_balance is not None:
-                    expected_bal = round(
-                        last_printed_balance + (first_row.credit or 0.0) - (first_row.debit or 0.0),
-                        2,
-                    )
-                    is_numbered_continuation = (
-                        prev_printed_page is not None
-                        and cur_printed_page is not None
-                        and cur_printed_page == prev_printed_page + 1
-                        and (cur_period_sig == prev_period_sig or cur_period_sig[1] is None)
-                    )
-                    if abs(expected_bal - first_row.printed_balance) > AUDIT_TOL and not is_numbered_continuation:
-                        seam_break = True
-
-            if seam_break:
-                current_session = _spawn_session(diag)
-
-        if eff_page_idx not in current_session.pages:
-            current_session.pages.append(eff_page_idx)
-
-        # Append page rows, splitting mid-page if a new SALDO AWAL row appears after transactions
-        for r in p_rows:
-            if r.is_opening and current_session.transactions:
-                current_session = _spawn_session(diag, [r])
-                continue
-            current_session.transactions.append(r)
-            if r.is_opening and current_session.opening_balance is None and r.printed_balance is not None:
-                current_session.opening_balance = r.printed_balance
-            if r.printed_balance is not None:
-                last_printed_balance = r.printed_balance
-
-        if rep_totals:
-            current_session.reported_totals.update(rep_totals)
-            if "closing_balance" in rep_totals and rep_totals["closing_balance"] is not None:
-                last_printed_balance = rep_totals["closing_balance"]
-        if page_sealed:
-            current_session.is_sealed = True
-
-        prev_printed_page = cur_printed_page
-        if cur_period_sig[1] is not None:
-            prev_period_sig = cur_period_sig
-
-    return [s for s in sessions if s.transactions or s.reported_totals]
-
-
-def forward_fill_session_balances(
-    session: StatementSession,
-    opening_hint: float | None = None,
-) -> None:
-    """Forward-fill missing/empty balance (saldo) cells sequentially per session
-    using running_balance = running_balance + credit - debit seeded from Saldo Awal.
-    """
-    running_balance: float | None = (
-        session.opening_balance
-        if session.opening_balance is not None
-        else next(
-            (
-                r.printed_balance if r.printed_balance is not None else r.balance
-                for r in session.transactions
-                if r.is_opening and (r.printed_balance is not None or r.balance is not None)
-            ),
-            session.reported_totals.get("opening", opening_hint),
-        )
-    )
-
-    for row in session.transactions:
-        if row.is_opening:
-            open_bal = row.printed_balance if row.printed_balance is not None else row.balance
-            if open_bal is not None:
-                running_balance = open_bal
-                row.balance = open_bal
-            elif running_balance is not None:
-                row.balance = running_balance
-            continue
-
-        credit = row.credit or 0.0
-        debit = row.debit or 0.0
-        if running_balance is not None:
-            running_balance = round(running_balance + credit - debit, 2)
-
-        if row.printed_balance is not None:
-            row.balance = row.printed_balance
-            running_balance = row.printed_balance
-        elif row.balance is not None and row.has_printed_balance:
-            row.printed_balance = row.balance
-            running_balance = row.balance
-        elif running_balance is not None:
-            row.balance = running_balance
-            if row.computed_balance is None:
-                row.computed_balance = running_balance
-        elif row.balance is not None:
-            running_balance = row.balance
+from component.page import apply_dates, process_page
+from component.table import printed_totals
+from component.parsing import indonesia_date_key, months_between, parse_statement_period, row_month_pair
+from component.ledger import (
+    AccountBucket,
+    audit_ledger,
+    dedupe_repeated_balance_rows,
+    dedupe_same_month_openings,
+    forward_fill_session_balances,
+    group_key_label,
+    has_internal_bucket_discrepancy,
+    order_page_bundles,
+    page_signature_hash,
+    slice_into_sessions,
+)
 
 
 def summarize_account(
@@ -379,33 +74,50 @@ def summarize_account(
         )
         sessions = [single_session] if (rows or printed) else []
 
+    if len(sessions) > 1:
+        def _session_chrono_key(sess: StatementSession) -> tuple:
+            if sess.period_start is not None:
+                p_dk = (sess.period_start.year, sess.period_start.month, sess.period_start.day)
+            else:
+                dated = [indonesia_date_key(r) for r in sess.transactions if indonesia_date_key(r) != (0, 0, 0)]
+                p_dk = min(dated) if dated else (9999, 99, 99)
+            first_t = min(
+                (r.time for r in sess.transactions if getattr(r, "time", None) is not None),
+                default=(99, 99, 99),
+            )
+            return (p_dk, first_t, sess.session_index)
+
+        sessions = sorted(sessions, key=_session_chrono_key)
+
     all_session_issues: list[AuditIssue] = []
     all_discrepancy_alerts: list[dict[str, Any]] = []
     session_summaries: list[dict[str, Any]] = []
     master_rows: list[ExtractedRow] = []
+    observed_orders: list[str] = []
 
     # Tier 1: Local Session Audit (Per StatementSession)
     for sess_idx, sess in enumerate(sessions):
         sess.session_index = sess_idx
-        sess_printed: dict[str, float] = {}
-        for k, v in sess.reported_totals.items():
-            if v is None:
-                continue
-            if k == "closing_balance":
-                sess_printed["closing"] = v
-            elif k in ("debit", "credit", "opening", "closing"):
-                sess_printed[k] = v
+        sess_printed = normalize_reported_totals(sess.reported_totals)
 
         if len(sessions) == 1 and printed:
             for k, v in printed.items():
                 if k not in sess_printed and v is not None:
                     sess_printed[k] = v
 
-        s_info = audit_ledger(
+        s_open_hint = None if any(r.is_opening for r in sess.transactions) else (sess.opening_balance or sess_printed.get("opening"))
+        sess.transactions = dedupe_repeated_balance_rows(
             sess.transactions,
-            opening_hint=None if any(r.is_opening for r in sess.transactions) else (sess.opening_balance or sess_printed.get("opening")),
+            opening_hint=s_open_hint,
             printed=sess_printed,
         )
+
+        s_info = audit_ledger(
+            sess.transactions,
+            opening_hint=s_open_hint,
+            printed=sess_printed,
+        )
+        observed_orders.append(s_info.get("order", "as_printed"))
         eff_open = next(
             (r.printed_balance for r in sess.transactions if r.is_opening and r.printed_balance is not None),
             s_info.get("inferred_opening_balance", sess_printed.get("opening", sess.opening_balance)),
@@ -473,10 +185,6 @@ def summarize_account(
             and abs(s_prev.closing_balance - s_next.opening_balance) > AUDIT_TOL
         ):
             gap = round(s_prev.closing_balance - s_next.opening_balance, 2)
-            if "SESSION_CONTINUITY_GAP" not in seam_row.validation:
-                seam_row.validation.append("SESSION_CONTINUITY_GAP")
-            if "MISSING_PERIOD_OR_CONTINUITY_GAP" not in seam_row.validation:
-                seam_row.validation.append("MISSING_PERIOD_OR_CONTINUITY_GAP")
             if seam_row.is_opening:
                 seam_row.is_reconciled = False
                 seam_row.reconciliation_status = "DISCREPANCY"
@@ -488,31 +196,17 @@ def summarize_account(
                 f"at transaction_index={seam_tx_idx}: previous closing balance {s_prev.closing_balance:,.2f} != "
                 f"next opening balance {s_next.opening_balance:,.2f} (gap {gap:+,.2f})."
             )
-            all_session_issues.append(
-                AuditIssue(
-                    transaction_index=seam_tx_idx,
-                    pdf_page=seam_row.pdf_page_index,
-                    date=format_issue_date(seam_row.date),
-                    issue_type="SESSION_CONTINUITY_GAP",
-                    severity="HIGH",
-                    printed_value=s_next.opening_balance,
-                    expected_value=s_prev.closing_balance,
-                    discrepancy=gap,
-                    description=desc_msg,
-                )
-            )
-            all_session_issues.append(
-                AuditIssue(
-                    transaction_index=seam_tx_idx,
-                    pdf_page=seam_row.pdf_page_index,
-                    date=format_issue_date(seam_row.date),
-                    issue_type="MISSING_PERIOD_OR_CONTINUITY_GAP",
-                    severity="HIGH",
-                    printed_value=s_next.opening_balance,
-                    expected_value=s_prev.closing_balance,
-                    discrepancy=gap,
-                    description=desc_msg,
-                )
+            emit_gap_pair(
+                seam_row,
+                severity="HIGH",
+                description=desc_msg,
+                target_list=all_session_issues,
+                transaction_index=seam_tx_idx,
+                pdf_page=seam_row.pdf_page_index,
+                date=iso_date(seam_row.date),
+                printed_value=s_next.opening_balance,
+                expected_value=s_prev.closing_balance,
+                discrepancy=gap,
             )
             continue
 
@@ -520,47 +214,29 @@ def summarize_account(
         prev_last_ym = next((row_month_pair(r) for r in reversed(s_prev.transactions) if row_month_pair(r)), None)
         next_first_ym = next((row_month_pair(r) for r in s_next.transactions if row_month_pair(r)), None)
         if prev_last_ym and next_first_ym and prev_last_ym != next_first_ym:
-            months_diff = (next_first_ym[0] - prev_last_ym[0]) * 12 + (next_first_ym[1] - prev_last_ym[1])
+            months_diff = months_between(prev_last_ym, next_first_ym)
             if months_diff > 1:
-                if "SESSION_CONTINUITY_GAP" not in seam_row.validation:
-                    seam_row.validation.append("SESSION_CONTINUITY_GAP")
-                if "MISSING_PERIOD_OR_CONTINUITY_GAP" not in seam_row.validation:
-                    seam_row.validation.append("MISSING_PERIOD_OR_CONTINUITY_GAP")
                 p_msg = (
                     f"Statement period jump between Session {s_prev.session_index} ({prev_last_ym[0]}-{prev_last_ym[1]:02d}) "
                     f"and Session {s_next.session_index} ({next_first_ym[0]}-{next_first_ym[1]:02d}) at transaction_index={seam_tx_idx}."
                 )
-                all_session_issues.append(
-                    AuditIssue(
-                        transaction_index=seam_tx_idx,
-                        pdf_page=seam_row.pdf_page_index,
-                        date=format_issue_date(seam_row.date),
-                        issue_type="SESSION_CONTINUITY_GAP",
-                        severity="MEDIUM",
-                        printed_value=s_next.opening_balance,
-                        expected_value=s_prev.closing_balance,
-                        discrepancy=None,
-                        description=p_msg,
-                    )
-                )
-                all_session_issues.append(
-                    AuditIssue(
-                        transaction_index=seam_tx_idx,
-                        pdf_page=seam_row.pdf_page_index,
-                        date=format_issue_date(seam_row.date),
-                        issue_type="MISSING_PERIOD_OR_CONTINUITY_GAP",
-                        severity="MEDIUM",
-                        printed_value=s_next.opening_balance,
-                        expected_value=s_prev.closing_balance,
-                        discrepancy=None,
-                        description=p_msg,
-                    )
+                emit_gap_pair(
+                    seam_row,
+                    severity="MEDIUM",
+                    description=p_msg,
+                    target_list=all_session_issues,
+                    transaction_index=seam_tx_idx,
+                    pdf_page=seam_row.pdf_page_index,
+                    date=iso_date(seam_row.date),
+                    printed_value=s_next.opening_balance,
+                    expected_value=s_prev.closing_balance,
+                    discrepancy=None,
                 )
 
     forensics = run_forensic_audit(paths or [], rows, page_overlaid=overlaid_findings)
 
     for row in rows:
-        row.confidence = max(0.0, round(1.0 - sum(PENALTIES.get(v, 0.2) for v in row.validation), 3))
+        apply_confidence(row)
 
     combined_issues: list[AuditIssue] = []
     combined_issues.extend(stream_issues or [])
@@ -619,9 +295,14 @@ def summarize_account(
 
     reconciled_count = sum(1 for r in rows if r.is_reconciled)
     reconciliation_pct = round(100.0 * reconciled_count / len(rows), 1) if rows else 100.0
+    summary_order = (
+        observed_orders[0]
+        if observed_orders and len(set(observed_orders)) == 1
+        else ("chronological" if any(o != "as_printed" for o in observed_orders) else "as_printed")
+    )
 
     summary: dict[str, Any] = {
-        "order": "as_printed",
+        "order": summary_order,
         "debit_credit_swapped": False,
         "math_discrepancy_alerts": all_discrepancy_alerts,
         "opening_balance": opening,
@@ -642,11 +323,7 @@ def summarize_account(
     if printed or any(s.reported_totals for s in sessions):
         if len(sessions) == 1:
             eff_printed = dict(printed)
-            for k, v in sessions[0].reported_totals.items():
-                if k == "closing_balance":
-                    eff_printed["closing"] = v
-                elif k in ("debit", "credit", "opening", "closing"):
-                    eff_printed[k] = v
+            eff_printed.update(normalize_reported_totals(sessions[0].reported_totals))
             summary["printed_totals"] = eff_printed
             computed = {"debit": total_debit, "credit": total_credit, "closing": closing, "opening": opening}
             summary["printed_totals_match"] = all(
@@ -667,6 +344,11 @@ def summarize_account(
     return summary, audit_result
 
 
+# ---------------------------------------------------------------------------
+# Statement Extraction Orchestrator & CLI
+# ---------------------------------------------------------------------------
+
+
 def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DEFAULT_DPI) -> dict[str, Any]:
     raw_paths = [pdf_path] if isinstance(pdf_path, (str, Path)) else list(pdf_path)
     if not raw_paths:
@@ -678,11 +360,7 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
 
     pages: list[dict] = []
     all_years: list[int] = []
-    account_page_bundles: dict[tuple[str, str], list[tuple[int, dict, list[ExtractedRow]]]] = {}
-    account_printed: dict[tuple[str, str], dict[str, float]] = {}
-    account_years: dict[tuple[str, str], list[int]] = {}
-    account_paths: dict[tuple[str, str], list[Path]] = {}
-    account_overlaid: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    account_buckets: dict[tuple[str, str], AccountBucket] = {}
 
     global_pdf_page_counter = 0
 
@@ -730,7 +408,14 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
                 if r.printed_balance is not None:
                     prev_page_closing = r.printed_balance
 
-            overlaid_on_page = detect_overlaid_streams(eff_page_idx, spans, page_rows)
+            numeric_spans = diag.pop("numeric_spans", spans)
+            pre_overlaid = diag.pop("overlaid_pairs", None)
+            overlaid_on_page = detect_overlaid_streams(
+                eff_page_idx,
+                numeric_spans,
+                page_rows,
+                overlaid_pairs=pre_overlaid,
+            )
             doc_overlaid.extend(overlaid_on_page)
             diag["source"] = source
             diag["words"] = len(words)
@@ -772,58 +457,40 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
         doc_printed = {**printed_totals(full_text), **state.printed}
 
         group_key = (doc_bank, doc_acc)
-        account_page_bundles.setdefault(group_key, []).extend(doc_page_bundles)
-        account_paths.setdefault(group_key, []).append(path)
-        account_overlaid.setdefault(group_key, []).extend(doc_overlaid)
+        bucket = account_buckets.setdefault(group_key, AccountBucket())
+        bucket.page_bundles.extend(doc_page_bundles)
+        bucket.paths.append(path)
+        bucket.overlaid.extend(doc_overlaid)
         if doc_printed:
-            account_printed.setdefault(group_key, {}).update(doc_printed)
+            bucket.printed.update(doc_printed)
         if doc_year:
-            account_years.setdefault(group_key, []).append(doc_year)
+            bucket.years.append(doc_year)
 
-    for bnk, acc in list(account_page_bundles.keys()):
+    for bnk, acc in list(account_buckets.keys()):
         if not bnk and acc:
-            match_key = next(((b, a) for b, a in account_page_bundles if b and a == acc), None)
+            match_key = next(((b, a) for b, a in account_buckets if b and a == acc), None)
             if match_key:
-                bundles_to_move = account_page_bundles.pop((bnk, acc))
-                for _, diag, p_rows in bundles_to_move:
-                    diag["bank"] = match_key[0]
-                    for row in p_rows:
-                        row.bank = match_key[0]
-                account_page_bundles[match_key].extend(bundles_to_move)
-                if (bnk, acc) in account_printed:
-                    account_printed.setdefault(match_key, {}).update(account_printed.pop((bnk, acc)))
-                if (bnk, acc) in account_years:
-                    account_years.setdefault(match_key, []).extend(account_years.pop((bnk, acc)))
-                if (bnk, acc) in account_paths:
-                    account_paths.setdefault(match_key, []).extend(account_paths.pop((bnk, acc)))
-                if (bnk, acc) in account_overlaid:
-                    account_overlaid.setdefault(match_key, []).extend(account_overlaid.pop((bnk, acc)))
+                src_bucket = account_buckets.pop((bnk, acc))
+                src_bucket.merge_into(account_buckets[match_key], new_bank=match_key[0])
 
-    if ("", "") in account_page_bundles and len(account_page_bundles) > 1:
-        unknown_bundles = account_page_bundles.pop(("", ""))
-        for _, diag, p_rows in unknown_bundles:
+    if ("", "") in account_buckets and len(account_buckets) > 1:
+        unknown_bucket = account_buckets.pop(("", ""))
+        for _, diag, p_rows in unknown_bucket.page_bundles:
             diag["account"] = "Unknown"
             diag["account_number"] = "UNKNOWN_ACCOUNT"
             for row in p_rows:
                 row.account = "Unknown"
-        account_page_bundles[("", "Unknown")] = unknown_bundles
-        if ("", "") in account_printed:
-            account_printed[("", "Unknown")] = account_printed.pop(("", ""))
-        if ("", "") in account_years:
-            account_years[("", "Unknown")] = account_years.pop(("", ""))
-        if ("", "") in account_paths:
-            account_paths[("", "Unknown")] = account_paths.pop(("", ""))
-        if ("", "") in account_overlaid:
-            account_overlaid[("", "Unknown")] = account_overlaid.pop(("", ""))
+        account_buckets[("", "Unknown")] = unknown_bucket
 
     overall_year = Counter(all_years).most_common(1)[0][0] if all_years else None
     accounts_out: dict[str, dict[str, Any]] = {}
     audit_results_map: dict[str, StatementAuditResult] = {}
     combined_rows: list[ExtractedRow] = []
 
-    for group_key, page_bundles in account_page_bundles.items():
+    for group_key, bucket in account_buckets.items():
         bank_name, acc = group_key
-        years = account_years.get(group_key, [])
+        page_bundles = bucket.page_bundles
+        years = bucket.years
         acc_year = Counter(years).most_common(1)[0][0] if years else overall_year
 
         # Phase 2.2: Page Deduplication
@@ -836,7 +503,7 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
             if sig_hash is not None and sig_hash in seen_hashes:
                 diag["duplicate_dropped"] = True
                 duplicate_issues.append(
-                    AuditIssue(
+                    make_issue(
                         transaction_index=0,
                         pdf_page=eff_page_idx,
                         date="",
@@ -859,22 +526,27 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
 
         # Phase 4: In-Stream Session Slicing into StatementSession containers
         sessions = slice_into_sessions(ordered_bundles, default_account=acc or "UNKNOWN_ACCOUNT")
-        acc_open_hint = account_printed.get(group_key, {}).get("opening") if len(sessions) == 1 else None
+        acc_open_hint = bucket.printed.get("opening") if len(sessions) == 1 else None
         for sess in sessions:
             sess.transactions = dedupe_same_month_openings(sess.transactions)
             apply_dates(sess.transactions, acc_year)
+            sess.transactions = dedupe_repeated_balance_rows(
+                sess.transactions,
+                opening_hint=acc_open_hint,
+                printed=normalize_reported_totals(sess.reported_totals),
+            )
             forward_fill_session_balances(sess, opening_hint=acc_open_hint)
 
         rows_list = [r for sess in sessions for r in sess.transactions]
         for idx, row in enumerate(rows_list):
             row.transaction_index = idx
 
-        if not rows_list and not account_printed.get(group_key):
+        if not rows_list and not bucket.printed:
             continue
 
         stream_issues: list[AuditIssue] = []
         seen_repaired_paths: set[str] = set()
-        for doc_path in account_paths.get(group_key, input_paths):
+        for doc_path in (bucket.paths or input_paths):
             resolved_str = str(Path(doc_path).resolve())
             if resolved_str in seen_repaired_paths:
                 continue
@@ -882,7 +554,7 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
             rep = get_pdf_sanitize_report(doc_path)
             if rep.get("corrupt_stream_repaired"):
                 stream_issues.append(
-                    AuditIssue(
+                    make_issue(
                         transaction_index=0,
                         pdf_page=1,
                         date="",
@@ -901,13 +573,9 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
                 seen_fallback_pages.add(eff_page_idx)
                 first_row_on_page = next((r for r in rows_list if r.pdf_page_index == eff_page_idx), None)
                 tx_idx = first_row_on_page.transaction_index if first_row_on_page is not None else 0
-                dt_str = (
-                    first_row_on_page.date.isoformat()
-                    if first_row_on_page is not None and isinstance(first_row_on_page.date, (date, datetime))
-                    else str(first_row_on_page.date or "") if first_row_on_page is not None else ""
-                )
+                dt_str = iso_date(first_row_on_page.date) if first_row_on_page is not None else ""
                 stream_issues.append(
-                    AuditIssue(
+                    make_issue(
                         transaction_index=tx_idx,
                         pdf_page=eff_page_idx,
                         date=dt_str,
@@ -923,9 +591,9 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
         bank_name = bank_name or next((r.bank for r in rows_list if r.bank), "")
         acc_summary, audit_result = summarize_account(
             rows_list,
-            account_printed.get(group_key, {}),
-            paths=account_paths.get(group_key, input_paths),
-            overlaid_findings=account_overlaid.get(group_key, []),
+            bucket.printed,
+            paths=bucket.paths or input_paths,
+            overlaid_findings=bucket.overlaid,
             duplicate_issues=duplicate_issues,
             stream_issues=stream_issues,
             account_number=acc or "UNKNOWN_ACCOUNT",
@@ -1027,9 +695,6 @@ def extract_statement(pdf_path: str | Path | Sequence[str | Path], dpi: int = DE
     }
 
 
-extract_statements = extract_statement
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract Indonesian bank statements to Excel.")
     parser.add_argument("file", type=Path, nargs="+")
@@ -1042,3 +707,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
