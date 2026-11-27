@@ -392,8 +392,8 @@ def match_date(text: str) -> tuple[tuple, int] | None:
                 (r"^([0-3]\d)[/\-.]([01]\d)(\d{2})(?=\s|$|\d{2})", lambda m: (int(m[1]), int(m[2]), int(m[3]))),
                 (r"^([0-3]\d)([01]\d)[/\-.](\d{2})(?=\s|$|\d{2})", lambda m: (int(m[1]), int(m[2]), int(m[3]))),
                 (r"^([0-3]\d)[/\-.]1(\d{2})(?=\s|$|\d{2})", lambda m: (int(m[1]), 10 + int(m[2][0]), int(m[2]))),
-                (r"^([0-3]\d)([01]\d)(\d{2})(?=\s+\d|\d{6})", lambda m: (int(m[1]), int(m[2]), int(m[3]))),
-                (r"^([0-3]\d)([1-9])(\d{2})(?=\d{6})", lambda m: (int(m[1]), int(m[2]), int(m[3]))),
+                (r"^([0-3]\d)([01]\d)(\d{2})(?=\s+\d|[0-2]\d[0-5]\d[0-5]\d(?:\s|$))", lambda m: (int(m[1]), int(m[2]), int(m[3]))),
+                (r"^([0-3]\d)([1-9])(\d{2})(?=[0-2]\d[0-5]\d[0-5]\d(?:\s|$))", lambda m: (int(m[1]), int(m[2]), int(m[3]))),
             ):
                 m = re.match(pat, fixed)
                 if m:
@@ -579,6 +579,8 @@ def marker_direction(text: str) -> str | None:
 
 def line_direction(cells: Sequence[Any], amount_parser: Any = None) -> str | None:
     for cell in cells:
+        if getattr(cell, "assigned_column", None) == "balance":
+            continue
         if getattr(cell, "money", False):
             parser_fn = amount_parser if amount_parser is not None else parse_amount
             amount = parser_fn(cell.text)

@@ -699,21 +699,46 @@ def check_document_metadata(path: Path | str) -> dict[str, Any]:
     }
 
 
+def _format_font_style(flags: int) -> str:
+    parts: list[str] = []
+    if flags & 16:
+        parts.append("bold")
+    if flags & 2:
+        parts.append("italic")
+    if flags & 1:
+        parts.append("superscript")
+    if flags & 8:
+        parts.append("mono")
+    elif flags & 4:
+        parts.append("serif")
+    return "+".join(parts) if parts else "regular"
+
+
 def dominant_profile_for_tokens(profiles: Sequence[NumericTokenProfile]) -> dict[str, Any]:
+    total = max(len(profiles), 1)
     family_counts = Counter(p.font_family for p in profiles if p.font_family)
     subset_counts = Counter(p.subset_prefix for p in profiles if p.subset_prefix)
     size_counts = Counter(round(p.size, 1) for p in profiles if p.size > 0)
+    flags_counts = Counter(p.flags for p in profiles)
+    color_counts = Counter(p.color for p in profiles)
 
     dom_family, fam_n = family_counts.most_common(1)[0] if family_counts else ("", 0)
     dom_subset, sub_n = subset_counts.most_common(1)[0] if subset_counts else ("", 0)
-    dom_size, _ = size_counts.most_common(1)[0] if size_counts else (0.0, 0)
+    dom_size, size_n = size_counts.most_common(1)[0] if size_counts else (0.0, 0)
+    dom_flags, flags_n = flags_counts.most_common(1)[0] if flags_counts else (None, 0)
+    dom_color, color_n = color_counts.most_common(1)[0] if color_counts else (None, 0)
 
-    enforce_subset = bool(dom_subset) and (sub_n / max(len(profiles), 1) >= 0.75)
-    enforce_family = bool(dom_family) and (fam_n / max(len(profiles), 1) >= 0.65)
+    enforce_subset = bool(dom_subset) and (sub_n / total >= 0.75)
+    enforce_family = bool(dom_family) and (fam_n / total >= 0.65)
+    enforce_size = dom_size > 0 and (size_n / total >= 0.65)
+    enforce_flags = dom_flags is not None and (flags_n / total >= 0.65)
+    enforce_color = dom_color is not None and (color_n / total >= 0.75)
     return {
         "font_family": dom_family if enforce_family else "",
         "subset_prefix": dom_subset if enforce_subset else "",
-        "size": dom_size,
+        "size": dom_size if enforce_size else 0.0,
+        "flags": dom_flags if enforce_flags else None,
+        "color": dom_color if enforce_color else None,
     }
 
 
@@ -744,12 +769,16 @@ def detect_font_anomalies(rows: Sequence[ExtractedRow]) -> list[dict[str, Any]]:
         exp_family = dom["font_family"]
         exp_subset = dom["subset_prefix"]
         exp_size = dom["size"]
+        exp_flags = dom["flags"]
+        exp_color = dom["color"]
 
         family_mismatch = bool(exp_family and prof.font_family != exp_family)
         subset_mismatch = bool(exp_subset and prof.subset_prefix != exp_subset)
         size_mismatch = bool(exp_size > 0 and abs(round(prof.size, 1) - exp_size) > 0.25)
+        style_mismatch = exp_flags is not None and prof.flags != exp_flags
+        color_mismatch = exp_color is not None and prof.color != exp_color
 
-        if family_mismatch or subset_mismatch or size_mismatch:
+        if family_mismatch or subset_mismatch or size_mismatch or style_mismatch or color_mismatch:
             add_flag(row, "FONT_ANOMALY")
             reasons: list[str] = []
             if family_mismatch:
@@ -758,6 +787,12 @@ def detect_font_anomalies(rows: Sequence[ExtractedRow]) -> list[dict[str, Any]]:
                 reasons.append(f"subset_prefix='{prof.subset_prefix}' vs expected='{exp_subset}'")
             if size_mismatch:
                 reasons.append(f"size={prof.size}pt vs expected={exp_size}pt")
+            if style_mismatch:
+                reasons.append(
+                    f"style='{_format_font_style(prof.flags)}' vs expected='{_format_font_style(exp_flags)}'"
+                )
+            if color_mismatch:
+                reasons.append(f"color=#{prof.color:06x} vs expected=#{exp_color:06x}")
             anomalies.append({
                 "flag": "FONT_ANOMALY",
                 "row_index": tx_idx,
@@ -771,9 +806,13 @@ def detect_font_anomalies(rows: Sequence[ExtractedRow]) -> list[dict[str, Any]]:
                 "font_family": prof.font_family,
                 "subset_prefix": prof.subset_prefix,
                 "size": prof.size,
+                "style": _format_font_style(prof.flags),
+                "color": f"#{prof.color:06x}",
                 "expected_font_family": exp_family,
                 "expected_subset_prefix": exp_subset,
                 "expected_size": exp_size,
+                "expected_style": _format_font_style(exp_flags) if exp_flags is not None else "",
+                "expected_color": f"#{exp_color:06x}" if exp_color is not None else "",
                 "detail": f"Transaction {tx_idx} ({prof.assigned_column}='{prof.text}'): " + ", ".join(reasons),
             })
 

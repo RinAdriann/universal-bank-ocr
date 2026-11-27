@@ -1,6 +1,8 @@
-.venv/
 __pycache__/
 *.pyc
+model/
+tests/Data/
+PDFBank/
 
 # Environment files
 .env

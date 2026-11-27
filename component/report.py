@@ -58,39 +58,100 @@ def rows_df(rows: list[Any], format_dt: bool = True, escape_excel: bool = False)
     return df
 
 
-def review_df(rows: list[Any], detailed: bool = True, escape_excel: bool = False) -> pd.DataFrame:
+def review_df(
+    rows: list[Any],
+    detailed: bool = True,
+    escape_excel: bool = False,
+    only_issues: bool = True,
+    audit_issues: Sequence[Any] | None = None,
+) -> pd.DataFrame:
     records = []
     idx_list = []
+    seen_row_flags: set[tuple[int, str]] = set()
     for i, row in enumerate(rows):
+        row_flags = list(getattr(row, "validation", None) or [])
+        if only_issues and not row_flags:
+            continue
         tx_idx = getattr(row, "transaction_index", i)
+        for fl in row_flags:
+            seen_row_flags.add((tx_idx, fl))
         idx_list.append(tx_idx)
         raw = safe_str(row.raw_text) if escape_excel else (row.raw_text or "")
-        counterparty = safe_str(getattr(row, "counterparty_name", "")) if escape_excel else (getattr(row, "counterparty_name", "") or "")
         ref = safe_str(getattr(row, "reference", "")) if escape_excel else (getattr(row, "reference", "") or "")
-        flags = ", ".join(row.validation)
+        flags = ", ".join(row_flags)
         if detailed:
             records.append({
                 "transaction_index": tx_idx,
                 "Halaman": row.page,
-                "Pihak Terkait": counterparty,
                 "No. Referensi": ref,
                 "Extraction confidence": getattr(row, "extraction_confidence", "HIGH"),
                 "Reconciliation status": getattr(row, "reconciliation_status", "UNVERIFIED"),
                 "Confidence": round(getattr(row, "confidence", 1.0), 3),
-                "Human review status": "Needs review" if row.validation else "Pending review",
-                "Validation flags": flags,
+                "Human review status": "Needs review" if row_flags else "Pending review",
+                "Issue": flags,
                 "Full detected text": raw,
             })
         else:
             records.append({
                 "Halaman": row.page,
-                "Pihak Terkait": counterparty,
-                "No. Referensi": ref,
-                "Validation flags": flags,
+                "Issue": flags,
                 "Full detected text": raw,
             })
-    cols = None if detailed else REVIEW_COLS
-    df = pd.DataFrame(records, index=idx_list if rows else None, columns=cols)
+
+    for issue in audit_issues or []:
+        if isinstance(issue, dict):
+            tx_idx = issue.get("transaction_index")
+            pdf_page = issue.get("pdf_page")
+            issue_type = str(issue.get("issue_type") or "")
+            desc = str(issue.get("description") or "")
+        else:
+            tx_idx = getattr(issue, "transaction_index", None)
+            pdf_page = getattr(issue, "pdf_page", None)
+            issue_type = str(getattr(issue, "issue_type", "") or "")
+            desc = str(getattr(issue, "description", "") or "")
+        if not issue_type:
+            continue
+        if tx_idx is not None and (tx_idx, issue_type) in seen_row_flags:
+            continue
+        seen_row_flags.add((tx_idx if tx_idx is not None else -1, issue_type))
+        page_val = pdf_page if pdf_page else "-"
+        desc_val = safe_str(desc) if escape_excel else desc
+        idx_list.append(tx_idx if tx_idx is not None else -1)
+        if detailed:
+            records.append({
+                "transaction_index": tx_idx if tx_idx is not None else -1,
+                "Halaman": page_val,
+                "No. Referensi": "",
+                "Extraction confidence": "-",
+                "Reconciliation status": "-",
+                "Confidence": 0.0,
+                "Human review status": "Needs review",
+                "Issue": issue_type,
+                "Full detected text": desc_val,
+            })
+        else:
+            records.append({
+                "Halaman": page_val,
+                "Issue": issue_type,
+                "Full detected text": desc_val,
+            })
+
+    cols = (
+        [
+            "transaction_index",
+            "Halaman",
+            "No. Referensi",
+            "Extraction confidence",
+            "Reconciliation status",
+            "Confidence",
+            "Human review status",
+            "Issue",
+            "Full detected text",
+        ]
+        if detailed
+        else REVIEW_COLS
+    )
+    df = pd.DataFrame(records, index=idx_list if records else None, columns=cols)
     df.index.name = "transaction_index"
     return df
 
@@ -173,12 +234,15 @@ def saldo_mengendap(rows: list[Any]) -> dict[tuple[int, int], list[tuple[Any, fl
                     eod_by_day[d] = bal
 
         # Priority cascade for Day-1 anchor:
-        # 1. Explicit month opening row
-        # 2. Previous month's final closing balance
-        # 3. Derived pre-transaction opening balance from first chronological tx
+        # 1. Last transaction balance on Day 1 of the current month
+        # 2. Explicit month opening row
+        # 3. Previous month's final closing balance
+        # 4. Derived pre-transaction opening balance from first chronological tx
         explicit_open = next((_row_bal(op) for op in openings if _row_bal(op) is not None), None)
-        if explicit_open is not None:
-            day1_anchor: float | None = explicit_open
+        if 1 in eod_by_day:
+            day1_anchor: float | None = eod_by_day[1]
+        elif explicit_open is not None:
+            day1_anchor = explicit_open
         elif prev_month_last_eod is not None:
             day1_anchor = prev_month_last_eod
         else:
@@ -569,9 +633,13 @@ def _write_account_recap_block(
 
     bold_font = styles["bold_font"]
     reg_font = styles["reg_font"]
-    gray_fill = styles["gray_fill"]
-    yellow_fill = styles["yellow_fill"]
-    box_border = styles["box_border"]
+    hdr_font = styles["hdr_font"]
+    sub_font = styles["sub_font"]
+    hdr_fill = styles["hdr_fill"]
+    sub_fill = styles["sub_fill"]
+    total_fill = styles["total_fill"]
+    grid_border = styles["grid_border"]
+    accounting_total_border = styles["accounting_total_border"]
     align_center = styles["align_center"]
     align_left = styles["align_left"]
     align_right = styles["align_right"]
@@ -581,27 +649,29 @@ def _write_account_recap_block(
     ws.merge_cells(start_row=cur_row, start_column=s, end_row=cur_row, end_column=ket_col_idx)
     for col_i in range(s, ket_col_idx + 1):
         c = ws.cell(cur_row, col_i)
-        c.font = bold_font
+        c.font = sub_font
+        c.fill = sub_fill
         c.alignment = align_center
-        c.border = box_border
+        c.border = grid_border
     cur_row += 1
 
     ws.cell(cur_row, s, safe_str(holder))
     ws.merge_cells(start_row=cur_row, start_column=s, end_row=cur_row, end_column=ket_col_idx)
     for col_i in range(s, ket_col_idx + 1):
         c = ws.cell(cur_row, col_i)
-        c.font = bold_font
+        c.font = sub_font
+        c.fill = sub_fill
         c.alignment = align_center
-        c.border = box_border
+        c.border = grid_border
     cur_row += 1
 
-    headers = [""] + month_headers + ["Total Result", "Keterangan"]
+    headers = ["Pihak Terkait"] + month_headers + ["Total Result", "Keterangan"]
     for offset, h_text in enumerate(headers):
         c = ws.cell(cur_row, s + offset, h_text)
-        c.font = bold_font
-        c.fill = gray_fill
-        c.alignment = align_center
-        c.border = box_border
+        c.font = hdr_font
+        c.fill = hdr_fill
+        c.alignment = align_left if offset == 0 else align_center
+        c.border = grid_border
     cur_row += 1
 
     start_row = cur_row
@@ -613,7 +683,7 @@ def _write_account_recap_block(
         c_cp = ws.cell(cur_row, s, safe_str(item["counterparty"]))
         c_cp.font = reg_font
         c_cp.alignment = align_left
-        c_cp.border = box_border
+        c_cp.border = grid_border
 
         for m_i, ym in enumerate(months or [None], start=first_m_idx):
             val = item["monthly"].get(ym, 0.0) if ym is not None else 0.0
@@ -621,41 +691,44 @@ def _write_account_recap_block(
             cm.number_format = CURRENCY_FMT
             cm.alignment = align_right
             cm.font = reg_font
-            cm.border = box_border
+            cm.border = grid_border
 
         ct = ws.cell(cur_row, tot_col_idx, f"=SUM({first_m_let}{cur_row}:{last_m_let}{cur_row})")
         ct.number_format = CURRENCY_FMT
         ct.alignment = align_right
         ct.font = reg_font
-        ct.border = box_border
+        ct.border = grid_border
 
         ck = ws.cell(cur_row, ket_col_idx, "")
         ck.font = reg_font
         ck.alignment = align_left
-        ck.border = box_border
+        ck.border = grid_border
         cur_row += 1
 
     end_row = cur_row - 1
     tot_row = cur_row
     c_tot_lbl = ws.cell(tot_row, s, "Total Result")
     c_tot_lbl.font = bold_font
+    c_tot_lbl.fill = total_fill
     c_tot_lbl.alignment = align_left
-    c_tot_lbl.border = box_border
+    c_tot_lbl.border = grid_border
 
     for col_i in range(first_m_idx, tot_col_idx + 1):
         col_let = get_column_letter(col_i)
         cs = ws.cell(tot_row, col_i, f"=SUM({col_let}{start_row}:{col_let}{end_row})")
         cs.font = bold_font
+        cs.fill = total_fill
         cs.number_format = CURRENCY_FMT
         cs.alignment = align_right
-        cs.border = box_border
+        cs.border = grid_border
 
     ck_tot = ws.cell(tot_row, ket_col_idx, "")
-    ck_tot.border = box_border
+    ck_tot.fill = total_fill
+    ck_tot.border = grid_border
     cur_row += 1
 
     avg_row = cur_row
-    ws.cell(avg_row, s, "")
+    ws.cell(avg_row, s, "Rata-rata")
     ws.cell(avg_row, first_m_idx, f"=AVERAGE({first_m_let}{tot_row}:{last_m_let}{tot_row})")
     ws.merge_cells(start_row=avg_row, start_column=first_m_idx, end_row=avg_row, end_column=tot_col_idx)
     ws.cell(avg_row, ket_col_idx, "")
@@ -663,20 +736,18 @@ def _write_account_recap_block(
     for col_i in range(s, ket_col_idx + 1):
         c = ws.cell(avg_row, col_i)
         c.font = bold_font
-        c.fill = yellow_fill
-        c.border = box_border
-        if col_i == first_m_idx:
+        c.fill = total_fill
+        c.border = accounting_total_border
+        if col_i == s:
+            c.alignment = align_left
+        elif col_i == first_m_idx:
             c.number_format = CURRENCY_FMT
             c.alignment = align_center
 
     return avg_row + 2
 
 
-def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASAN") -> Any:
-    if title in wb.sheetnames:
-        del wb[title]
-    ws = wb.create_sheet(title=title[:31], index=0)
-
+def _excel_styles() -> dict[str, Any]:
     title_font = Font(name="Calibri", size=13, bold=True, color="1F4E78")
     section_font = Font(name="Calibri", size=11, bold=True, color="000000", underline="single")
     sub_font = Font(name="Calibri", size=10, bold=True, color="2F5597")
@@ -707,16 +778,105 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
     align_left = Alignment(horizontal="left", vertical="center")
     align_right = Alignment(horizontal="right", vertical="center")
 
-    recap_styles = {
+    return {
+        "title_font": title_font,
+        "section_font": section_font,
+        "sub_font": sub_font,
+        "hdr_font": hdr_font,
         "bold_font": bold_font,
         "reg_font": reg_font,
+        "hdr_fill": hdr_fill,
+        "sub_fill": sub_fill,
+        "total_fill": total_fill,
         "gray_fill": gray_fill,
         "yellow_fill": yellow_fill,
+        "grid_border": grid_border,
         "box_border": box_border,
+        "accounting_total_border": accounting_total_border,
         "align_center": align_center,
         "align_left": align_left,
         "align_right": align_right,
     }
+
+
+def autofit_columns(
+    ws: Any,
+    min_width: int = 10,
+    max_width: int = 100,
+    spacer_cols: set[int] | None = None,
+    skip_rows: set[int] | None = None,
+) -> None:
+    spacer_set = spacer_cols or set()
+    skip_row_set = skip_rows or set()
+    merged_skip: set[tuple[int, int]] = set()
+    for m_range in ws.merged_cells.ranges:
+        if m_range.max_col > m_range.min_col:
+            for r in range(m_range.min_row, m_range.max_row + 1):
+                for c in range(m_range.min_col, m_range.max_col + 1):
+                    merged_skip.add((r, c))
+
+    for col_idx in range(1, ws.max_column + 1):
+        col_let = get_column_letter(col_idx)
+        if col_idx in spacer_set:
+            ws.column_dimensions[col_let].width = 4
+            continue
+
+        max_len = 0
+        has_formula_num = False
+        for row_idx in range(1, ws.max_row + 1):
+            if row_idx in skip_row_set or (row_idx, col_idx) in merged_skip:
+                continue
+            cell = ws.cell(row_idx, col_idx)
+            val = cell.value
+            if val is None or val == "":
+                continue
+            if isinstance(val, str) and val.startswith("="):
+                if cell.number_format == CURRENCY_FMT:
+                    has_formula_num = True
+                continue
+            if isinstance(val, (date, datetime)):
+                text = "dd/mm/yyyy"
+            elif isinstance(val, (int, float)):
+                if cell.number_format == CURRENCY_FMT:
+                    text = f"{val:,.2f}"
+                elif cell.number_format == "#,##0":
+                    text = f"{val:,.0f}"
+                else:
+                    text = str(val)
+            else:
+                text = str(val).lstrip("'")
+                if "\n" in text:
+                    text = max(text.splitlines(), key=len, default="")
+            if len(text) > max_len:
+                max_len = len(text)
+
+        if has_formula_num and max_len < 16:
+            max_len = 16
+
+        width = min(max(max_len + 4, min_width), max_width)
+        ws.column_dimensions[col_let].width = width
+
+
+def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASAN") -> Any:
+    if title in wb.sheetnames:
+        del wb[title]
+    ws = wb.create_sheet(title=title[:31], index=0)
+
+    styles = _excel_styles()
+    title_font = styles["title_font"]
+    section_font = styles["section_font"]
+    sub_font = styles["sub_font"]
+    hdr_font = styles["hdr_font"]
+    bold_font = styles["bold_font"]
+    reg_font = styles["reg_font"]
+    hdr_fill = styles["hdr_fill"]
+    sub_fill = styles["sub_fill"]
+    total_fill = styles["total_fill"]
+    grid_border = styles["grid_border"]
+    accounting_total_border = styles["accounting_total_border"]
+    align_center = styles["align_center"]
+    align_left = styles["align_left"]
+    align_right = styles["align_right"]
 
     groups = _extract_account_groups(result)
 
@@ -804,7 +964,8 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
 
     cur_row = s1_total_row + 2
 
-    ws.cell(cur_row, 1, "2. REKENING BANK (PER-ACCOUNT MONTHLY BREAKDOWN MATRIX)").font = section_font
+    s2_header_row = cur_row
+    ws.cell(s2_header_row, 1, "2. REKENING BANK (PER-ACCOUNT MONTHLY BREAKDOWN MATRIX)").font = section_font
     cur_row += 1
 
     for idx, (_, bank, acc, acc_rows, acc_data) in enumerate(groups, start=1):
@@ -812,14 +973,22 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
         m_metrics = calculate_monthly_metrics(acc_rows)
         months = list(m_metrics.keys())
 
-        sub_title = f"Bank : {bank} | No Rek : {acc} | Nama : {holder}"
-        c_sub = ws.cell(cur_row, 1, sub_title)
-        c_sub.font = sub_font
-        c_sub.fill = sub_fill
-        cur_row += 1
-
         month_headers = [m_metrics[ym]["label"] for ym in months] if months else ["Periode"]
         matrix_headers = ["Keterangan"] + month_headers + ["Total", "Rata-rata", "MK - MD"]
+        n_months = max(1, len(months))
+        diff_col_idx = 4 + n_months
+
+        sub_title = f"Bank : {bank} | No Rek : {acc} | Nama : {holder}"
+        ws.cell(cur_row, 1, sub_title)
+        ws.merge_cells(start_row=cur_row, start_column=1, end_row=cur_row, end_column=diff_col_idx)
+        for col_i in range(1, diff_col_idx + 1):
+            c_sub = ws.cell(cur_row, col_i)
+            c_sub.font = sub_font
+            c_sub.fill = sub_fill
+            c_sub.alignment = align_left
+            c_sub.border = grid_border
+        cur_row += 1
+
         for col_i, h_text in enumerate(matrix_headers, start=1):
             c = ws.cell(cur_row, col_i, h_text)
             c.font = hdr_font
@@ -828,12 +997,10 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
             c.border = grid_border
         cur_row += 1
 
-        n_months = max(1, len(months))
         first_m_col = get_column_letter(2)
         last_m_col = get_column_letter(1 + n_months)
         tot_col_idx = 2 + n_months
         avg_col_idx = 3 + n_months
-        diff_col_idx = 4 + n_months
         avg_col_let = get_column_letter(avg_col_idx)
 
         md_row = cur_row
@@ -905,18 +1072,6 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
 
         cur_row = sa_row + 2
 
-    col_widths: dict[int, int] = {
-        1: 36,
-        2: 18,
-        3: 20,
-        4: 26,
-        5: 20,
-        6: 20,
-        7: 20,
-        8: 22,
-        9: 22,
-    }
-
     recap_pairs = [
         (
             bank,
@@ -931,8 +1086,9 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
     max_md_cols = max((3 + max(1, len(md_r["months"])) for _, _, _, _, md_r, _ in recap_pairs), default=4)
     mk_start_col = 2 + max_md_cols
 
-    ws.cell(cur_row, 1, "3. Rekapan Transaksi MD").font = section_font
-    ws.cell(cur_row, mk_start_col, "4. Rekapan Transaksi MK").font = section_font
+    s3_header_row = cur_row
+    ws.cell(s3_header_row, 1, "3. Rekapan Transaksi MD").font = section_font
+    ws.cell(s3_header_row, mk_start_col, "4. Rekapan Transaksi MK").font = section_font
     cur_row += 1
 
     for bank, acc, holder, acc_rows, md_recap, mk_recap in recap_pairs:
@@ -944,7 +1100,7 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
             holder=holder,
             acc_rows=acc_rows,
             is_credit=False,
-            styles=recap_styles,
+            styles=styles,
             start_col=1,
             precomputed_recap=md_recap,
         )
@@ -956,26 +1112,21 @@ def create_memo_sheet(wb: Any, result: dict[str, Any], title: str = "00_RINGKASA
             holder=holder,
             acc_rows=acc_rows,
             is_credit=True,
-            styles=recap_styles,
+            styles=styles,
             start_col=mk_start_col,
             precomputed_recap=mk_recap,
         )
         cur_row = max(next_md_row, next_mk_row)
 
-        mk_n_m = max(1, len(mk_recap["months"]))
-        col_widths[mk_start_col] = max(col_widths.get(mk_start_col, 18), 36)
-        for offset in range(1, mk_n_m + 1):
-            c_idx = mk_start_col + offset
-            col_widths[c_idx] = max(col_widths.get(c_idx, 18), 18)
-        col_widths[mk_start_col + mk_n_m + 1] = max(col_widths.get(mk_start_col + mk_n_m + 1, 18), 20)
-        col_widths[mk_start_col + mk_n_m + 2] = max(col_widths.get(mk_start_col + mk_n_m + 2, 18), 22)
-
     spacer_col = mk_start_col - 1
-    if spacer_col > 9:
-        col_widths.setdefault(spacer_col, 4)
-
-    for col_idx in range(1, ws.max_column + 1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_idx, 18)
+    spacer_cols = {spacer_col} if spacer_col > 9 else set()
+    autofit_columns(
+        ws,
+        min_width=12,
+        max_width=60,
+        spacer_cols=spacer_cols,
+        skip_rows={1, 2, s2_header_row, s3_header_row},
+    )
 
     ws.freeze_panes = "A4"
     return ws
@@ -1017,10 +1168,11 @@ def sheet_title(prefix: str, bank: str, acc: str, used: set[str]) -> str:
     return name
 
 
-def write_date_cell(ws: Any, row_idx: int, col_idx: int, dt: Any) -> None:
+def write_date_cell(ws: Any, row_idx: int, col_idx: int, dt: Any) -> Any:
     cell = ws.cell(row_idx, col_idx, dt if dt is not None else "")
     if isinstance(dt, (date, datetime)):
         cell.number_format = "dd/mm/yyyy"
+    return cell
 
 
 def write_money_cell(ws: Any, row_idx: int, col_idx: int, val: float | str | None) -> Any:
@@ -1041,63 +1193,118 @@ def collapse_saldo_streaks(items: Sequence[tuple[Any, float]]) -> list[tuple[Any
     return streaks
 
 
-def saldo_mengendap_sheet(ws: Any, rows: list[Any], bold_font: Font) -> None:
+def saldo_mengendap_sheet(ws: Any, rows: list[Any], bold_font: Font | None = None) -> None:
+    styles = _excel_styles()
+    sub_font = styles["sub_font"]
+    hdr_font = styles["hdr_font"]
+    b_font = styles["bold_font"]
+    reg_font = styles["reg_font"]
+    hdr_fill = styles["hdr_fill"]
+    sub_fill = styles["sub_fill"]
+    total_fill = styles["total_fill"]
+    grid_border = styles["grid_border"]
+    accounting_total_border = styles["accounting_total_border"]
+    align_center = styles["align_center"]
+    align_left = styles["align_left"]
+    align_right = styles["align_right"]
+
     monthly = saldo_mengendap(rows)
     if not monthly:
-        ws.cell(1, 1, "Tanggal").font = bold_font
-        ws.cell(1, 2, "Saldo Mengendap").font = bold_font
-        ws.cell(1, 3, "Count").font = bold_font
-        ws.cell(1, 4, "Total").font = bold_font
-        ws.column_dimensions["A"].width = 14
-        ws.column_dimensions["B"].width = 18
-        ws.column_dimensions["C"].width = 10
-        ws.column_dimensions["D"].width = 20
+        for col_i, h_text in enumerate(("Tanggal", "Saldo Mengendap", "Count", "Total"), start=1):
+            c = ws.cell(1, col_i, h_text)
+            c.font = hdr_font
+            c.fill = hdr_fill
+            c.alignment = align_center if col_i in (1, 3) else align_right
+            c.border = grid_border
+        autofit_columns(ws)
         return
 
+    spacer_cols: set[int] = set()
     for idx, (ym, items) in enumerate(monthly.items()):
         col_date = 1 + idx * 5
         col_bal = col_date + 1
         col_count = col_date + 2
         col_total = col_date + 3
+        if idx > 0:
+            spacer_cols.add(col_date - 1)
 
         bal_let = get_column_letter(col_bal)
         count_let = get_column_letter(col_count)
         total_let = get_column_letter(col_total)
 
-        ws.cell(1, col_date, month_label(ym)).font = bold_font
+        ws.cell(1, col_date, month_label(ym))
         ws.merge_cells(start_row=1, start_column=col_date, end_row=1, end_column=col_total)
-        ws.cell(2, col_date, "Tanggal").font = bold_font
-        ws.cell(2, col_bal, "Saldo Mengendap").font = bold_font
-        ws.cell(2, col_count, "Count").font = bold_font
-        ws.cell(2, col_total, "Total").font = bold_font
+        for col_i in range(col_date, col_total + 1):
+            c_sub = ws.cell(1, col_i)
+            c_sub.font = sub_font
+            c_sub.fill = sub_fill
+            c_sub.alignment = align_center
+            c_sub.border = grid_border
+
+        for col_i, h_text in zip(
+            (col_date, col_bal, col_count, col_total),
+            ("Tanggal", "Saldo Mengendap", "Count", "Total"),
+        ):
+            c_hdr = ws.cell(2, col_i, h_text)
+            c_hdr.font = hdr_font
+            c_hdr.fill = hdr_fill
+            c_hdr.alignment = align_center if col_i in (col_date, col_count) else align_right
+            c_hdr.border = grid_border
 
         streaks = collapse_saldo_streaks(items)
         start_row = 3
         for offset, (dt, bal, count) in enumerate(streaks):
             row_idx = start_row + offset
-            write_date_cell(ws, row_idx, col_date, dt)
-            write_money_cell(ws, row_idx, col_bal, bal)
+            c_dt = write_date_cell(ws, row_idx, col_date, dt)
+            c_dt.font = reg_font
+            c_dt.alignment = align_center
+            c_dt.border = grid_border
+
+            c_bal = write_money_cell(ws, row_idx, col_bal, bal)
+            c_bal.font = reg_font
+            c_bal.alignment = align_right
+            c_bal.border = grid_border
+
             c_cnt = ws.cell(row_idx, col_count, count)
             c_cnt.number_format = "#,##0"
-            write_money_cell(ws, row_idx, col_total, f"={bal_let}{row_idx}*{count_let}{row_idx}")
+            c_cnt.font = reg_font
+            c_cnt.alignment = align_center
+            c_cnt.border = grid_border
+
+            c_tot = write_money_cell(ws, row_idx, col_total, f"={bal_let}{row_idx}*{count_let}{row_idx}")
+            c_tot.font = reg_font
+            c_tot.alignment = align_right
+            c_tot.border = grid_border
 
         if streaks:
             end_row = start_row + len(streaks) - 1
             sum_row = end_row + 1
-            ws.cell(sum_row, col_date, "Total / Rata-rata").font = bold_font
-            c_avg = write_money_cell(ws, sum_row, col_bal, f"={total_let}{sum_row}/{count_let}{sum_row}")
-            c_avg.font = bold_font
-            c_sum_cnt = ws.cell(sum_row, col_count, f"=SUM({count_let}{start_row}:{count_let}{end_row})")
-            c_sum_cnt.font = bold_font
-            c_sum_cnt.number_format = "#,##0"
-            c_sum_tot = write_money_cell(ws, sum_row, col_total, f"=SUM({total_let}{start_row}:{total_let}{end_row})")
-            c_sum_tot.font = bold_font
+            c_lbl = ws.cell(sum_row, col_date, "Total / Rata-rata")
+            c_lbl.font = b_font
+            c_lbl.fill = total_fill
+            c_lbl.alignment = align_left
+            c_lbl.border = accounting_total_border
 
-        ws.column_dimensions[get_column_letter(col_date)].width = 16
-        ws.column_dimensions[bal_let].width = 18
-        ws.column_dimensions[count_let].width = 10
-        ws.column_dimensions[total_let].width = 20
-        ws.column_dimensions[get_column_letter(col_total + 1)].width = 4
+            c_avg = write_money_cell(ws, sum_row, col_bal, f"={total_let}{sum_row}/{count_let}{sum_row}")
+            c_avg.font = b_font
+            c_avg.fill = total_fill
+            c_avg.alignment = align_right
+            c_avg.border = accounting_total_border
+
+            c_sum_cnt = ws.cell(sum_row, col_count, f"=SUM({count_let}{start_row}:{count_let}{end_row})")
+            c_sum_cnt.font = b_font
+            c_sum_cnt.fill = total_fill
+            c_sum_cnt.number_format = "#,##0"
+            c_sum_cnt.alignment = align_center
+            c_sum_cnt.border = accounting_total_border
+
+            c_sum_tot = write_money_cell(ws, sum_row, col_total, f"=SUM({total_let}{start_row}:{total_let}{end_row})")
+            c_sum_tot.font = b_font
+            c_sum_tot.fill = total_fill
+            c_sum_tot.alignment = align_right
+            c_sum_tot.border = accounting_total_border
+
+    autofit_columns(ws, spacer_cols=spacer_cols)
     ws.freeze_panes = "A3"
 
 
@@ -1109,38 +1316,136 @@ def write_top5_block(
     amt_header: str,
     rows: list[Any],
     field: str,
-    bold_font: Font,
+    bold_font: Font | None = None,
 ) -> None:
-    ws.cell(start_row, col_start, title).font = bold_font
+    styles = _excel_styles()
+    sub_font = styles["sub_font"]
+    hdr_font = styles["hdr_font"]
+    reg_font = styles["reg_font"]
+    hdr_fill = styles["hdr_fill"]
+    sub_fill = styles["sub_fill"]
+    grid_border = styles["grid_border"]
+    align_center = styles["align_center"]
+    align_left = styles["align_left"]
+    align_right = styles["align_right"]
+
+    ws.cell(start_row, col_start, title)
     ws.merge_cells(start_row=start_row, start_column=col_start, end_row=start_row, end_column=col_start + 2)
+    for col_i in range(col_start, col_start + 3):
+        c_sub = ws.cell(start_row, col_i)
+        c_sub.font = sub_font
+        c_sub.fill = sub_fill
+        c_sub.alignment = align_center
+        c_sub.border = grid_border
+
     for offset, header in enumerate(("Tanggal", amt_header, "Deskripsi")):
-        ws.cell(start_row + 1, col_start + offset, header).font = bold_font
+        c_hdr = ws.cell(start_row + 1, col_start + offset, header)
+        c_hdr.font = hdr_font
+        c_hdr.fill = hdr_fill
+        c_hdr.alignment = align_center if offset == 0 else (align_right if offset == 1 else align_left)
+        c_hdr.border = grid_border
 
     for idx, row in enumerate(rows, start=start_row + 2):
-        write_date_cell(ws, idx, col_start, row.date)
-        write_money_cell(ws, idx, col_start + 1, getattr(row, field))
-        ws.cell(idx, col_start + 2, safe_str(row.description))
+        c_dt = write_date_cell(ws, idx, col_start, row.date)
+        c_dt.font = reg_font
+        c_dt.alignment = align_center
+        c_dt.border = grid_border
+
+        c_amt = write_money_cell(ws, idx, col_start + 1, getattr(row, field))
+        c_amt.font = reg_font
+        c_amt.alignment = align_right
+        c_amt.border = grid_border
+
+        c_desc = ws.cell(idx, col_start + 2, safe_str(row.description))
+        c_desc.font = reg_font
+        c_desc.alignment = align_left
+        c_desc.border = grid_border
 
 
-def top5_sheet(ws: Any, rows: list[Any], bold_font: Font) -> None:
+def top5_sheet(ws: Any, rows: list[Any], bold_font: Font | None = None) -> None:
+    styles = _excel_styles()
+    hdr_font = styles["hdr_font"]
+    hdr_fill = styles["hdr_fill"]
+    grid_border = styles["grid_border"]
+    align_center = styles["align_center"]
+    align_left = styles["align_left"]
+    align_right = styles["align_right"]
+
     monthly = top5_monthly(rows)
     if not monthly:
-        ws.cell(1, 1, "Tanggal").font = bold_font
-        ws.cell(1, 2, "Nominal").font = bold_font
-        ws.cell(1, 3, "Deskripsi").font = bold_font
+        for col_i, h_text in enumerate(("Tanggal", "Nominal", "Deskripsi"), start=1):
+            c = ws.cell(1, col_i, h_text)
+            c.font = hdr_font
+            c.fill = hdr_fill
+            c.alignment = align_center if col_i == 1 else (align_right if col_i == 2 else align_left)
+            c.border = grid_border
+        autofit_columns(ws)
         return
 
+    spacer_cols: set[int] = set()
     for idx, (ym, data) in enumerate(monthly.items()):
         col_start = 1 + idx * 4
+        if idx > 0:
+            spacer_cols.add(col_start - 1)
         label = month_label(ym)
-        write_top5_block(ws, 1, col_start, f"{label} - Top 5 CR", "Kredit", data["cr"], "credit", bold_font)
-        write_top5_block(ws, 9, col_start, f"{label} - Top 5 DB", "Debit", data["db"], "debit", bold_font)
+        write_top5_block(ws, 1, col_start, f"{label} - Top 5 CR", "Kredit", data["cr"], "credit")
+        write_top5_block(ws, 9, col_start, f"{label} - Top 5 DB", "Debit", data["db"], "debit")
 
-        ws.column_dimensions[get_column_letter(col_start)].width = 14
-        ws.column_dimensions[get_column_letter(col_start + 1)].width = 18
-        ws.column_dimensions[get_column_letter(col_start + 2)].width = 50
-        ws.column_dimensions[get_column_letter(col_start + 3)].width = 4
+    autofit_columns(ws, spacer_cols=spacer_cols)
     ws.freeze_panes = "A3"
+
+
+def _style_tabular_sheet(
+    ws: Any,
+    styles: dict[str, Any],
+    center_cols: set[int] | None = None,
+    right_cols: set[int] | None = None,
+    date_cols: set[int] | None = None,
+    money_cols: set[int] | None = None,
+) -> None:
+    hdr_font = styles["hdr_font"]
+    reg_font = styles["reg_font"]
+    hdr_fill = styles["hdr_fill"]
+    grid_border = styles["grid_border"]
+    align_center = styles["align_center"]
+    align_left = styles["align_left"]
+    align_right = styles["align_right"]
+
+    c_set = center_cols or set()
+    r_set = right_cols or set()
+    d_set = date_cols or set()
+    m_set = money_cols or set()
+
+    for col_idx in range(1, ws.max_column + 1):
+        c_hdr = ws.cell(1, col_idx)
+        c_hdr.font = hdr_font
+        c_hdr.fill = hdr_fill
+        c_hdr.border = grid_border
+        if col_idx in c_set:
+            c_hdr.alignment = align_center
+        elif col_idx in r_set:
+            c_hdr.alignment = align_right
+        else:
+            c_hdr.alignment = align_left
+
+    for row_idx in range(2, ws.max_row + 1):
+        for col_idx in range(1, ws.max_column + 1):
+            c = ws.cell(row_idx, col_idx)
+            c.font = reg_font
+            c.border = grid_border
+            if col_idx in d_set and isinstance(c.value, (date, datetime)):
+                c.number_format = "dd/mm/yyyy"
+            if col_idx in m_set:
+                c.number_format = CURRENCY_FMT
+            if col_idx in c_set:
+                c.alignment = align_center
+            elif col_idx in r_set:
+                c.alignment = align_right
+            else:
+                c.alignment = align_left
+
+    ws.freeze_panes = "A2"
+    autofit_columns(ws)
 
 
 def excel_bytes(result: dict[str, Any]) -> bytes:
@@ -1150,14 +1455,20 @@ def excel_bytes(result: dict[str, Any]) -> bytes:
 
     if accounts_map:
         groups = [
-            (data.get("account") or "", data.get("bank") or "", data["rows"])
+            (
+                data.get("account") or "",
+                data.get("bank") or "",
+                data["rows"],
+                data.get("audit_result"),
+                data.get("summary") or {},
+            )
             for data in accounts_map.values()
         ]
     else:
-        groups = [("", "", rows)]
+        groups = [("", "", rows, result.get("audit_result"), result.get("summary") or {})]
 
     used_names: set[str] = set()
-    bold_font = Font(bold=True)
+    styles = _excel_styles()
     sheet_specs = (
         ("Detail", lambda _: True),
         ("In", lambda r: bool(r.credit and r.credit > 0)),
@@ -1166,33 +1477,48 @@ def excel_bytes(result: dict[str, Any]) -> bytes:
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         create_memo_sheet(writer.book, result, title="00_RINGKASAN")
-        for acc, bank, acc_rows in groups:
+        for acc, bank, acc_rows, audit_result, acc_summary in groups:
             for prefix, pred in sheet_specs:
                 sname = sheet_title(prefix, bank, acc, used_names)
                 filtered = [r for r in acc_rows if pred(r)]
                 rows_df(filtered, format_dt=False, escape_excel=True).to_excel(writer, sheet_name=sname, index=False)
 
                 ws = writer.sheets[sname]
-                ws.freeze_panes = "A2"
-                for col, width in zip(["A", "B", "C", "D", "E", "F", "G", "H"], [14, 16, 16, 16, 80, 28, 22, 22]):
-                    ws.column_dimensions[col].width = width
-                for excel_row in ws.iter_rows(min_row=2):
-                    if isinstance(excel_row[0].value, (date, datetime)):
-                        excel_row[0].number_format = "dd/mm/yyyy"
-                    for cell in excel_row[1:4]:
-                        cell.number_format = "#,##0.00"
+                _style_tabular_sheet(
+                    ws,
+                    styles,
+                    center_cols={1},
+                    right_cols={2, 3, 4},
+                    date_cols={1},
+                    money_cols={2, 3, 4},
+                )
 
             sm_name = sheet_title("Saldo Mengendap", bank, acc, used_names)
-            saldo_mengendap_sheet(writer.book.create_sheet(title=sm_name), acc_rows, bold_font)
+            saldo_mengendap_sheet(writer.book.create_sheet(title=sm_name), acc_rows)
 
             t5_name = sheet_title("Top 5", bank, acc, used_names)
-            top5_sheet(writer.book.create_sheet(title=t5_name), acc_rows, bold_font)
+            top5_sheet(writer.book.create_sheet(title=t5_name), acc_rows)
 
-            rev_name = sheet_title("Review", bank, acc, used_names)
-            review_df(acc_rows, detailed=False, escape_excel=True).to_excel(writer, sheet_name=rev_name, index=False)
-            rev_ws = writer.sheets[rev_name]
-            rev_ws.freeze_panes = "A2"
-            for col, width in zip(["A", "B", "C", "D", "E"], [10, 28, 22, 28, 100]):
-                rev_ws.column_dimensions[col].width = width
+            audit_issues = (
+                audit_result.issues
+                if audit_result is not None and hasattr(audit_result, "issues")
+                else acc_summary.get("issues", [])
+            )
+            audit_name = sheet_title("Audit", bank, acc, used_names)
+            review_df(
+                acc_rows,
+                detailed=False,
+                escape_excel=True,
+                only_issues=True,
+                audit_issues=audit_issues,
+            ).to_excel(
+                writer, sheet_name=audit_name, index=False
+            )
+            audit_ws = writer.sheets[audit_name]
+            _style_tabular_sheet(
+                audit_ws,
+                styles,
+                center_cols={1},
+            )
 
     return output.getvalue()

@@ -55,7 +55,7 @@ SUPPORTED_INPUT_SUFFIXES = {".pdf"} | IMAGE_SUFFIXES
 ALLOWED_EXTS = [ext.lstrip(".") for ext in sorted(SUPPORTED_INPUT_SUFFIXES)]
 
 DETAIL_COLS = ["Tanggal", "Kredit", "Debit", "Saldo", "Deskripsi", "Pihak Terkait", "Kategori Transaksi"]
-REVIEW_COLS = ["Halaman", "Pihak Terkait", "Validation flags", "Full detected text"]
+REVIEW_COLS = ["Halaman", "Issue", "Full detected text"]
 
 MONTH_MAP = {
     "JAN": 1, "PEB": 2, "FEB": 2, "MAR": 3, "APR": 4, "MEI": 5, "MAY": 5,
@@ -386,6 +386,7 @@ class NumericTokenProfile:
     subset_prefix: str = ""
     size: float = 0.0
     color: int = 0
+    flags: int = 0
     contiguous: bool = True
     signal1_ok: bool = True
     signal2_ok: bool = True
@@ -796,7 +797,7 @@ def emit_gap_pair(
 
 
 def normalize_reported_totals(totals: dict[str, Any] | None) -> dict[str, float]:
-    """Normalizes reported summary totals (e.g. closing_balance -> closing)."""
+    """Normalizes reported summary totals"""
     if not totals:
         return {}
     normalized: dict[str, float] = {}

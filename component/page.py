@@ -66,15 +66,7 @@ def apply_dates(
     period_start: date | None = None,
     state: State | None = None,
 ) -> None:
-    """Phase 2: Two-Stage Contextual Date Resolver.
-
-    Stage 1 (Strict Day-First & Indonesian Month Lexicon):
-      Group 1 -> Day, Group 2 -> Month, Group 3 -> Year (optional). Never flips to US MM/DD.
-    Stage 2 (Stateful Date Carry-Forward & Monotonic Year Rollover):
-      Maintains active_date, active_month, active_year across rows and pages.
-      Applies monotonic year rollover (active_month == 12 and month == 1 -> active_year += 1).
-      Inherits active_date on blank-date same-day transaction rows.
-    """
+    
     if not rows:
         return
 
@@ -87,9 +79,12 @@ def apply_dates(
             day, month, row_year, _ = row.date_parts
             row.date_parts = (day, month, row_year)
 
+    anchor_year = period_start.year if period_start is not None else year
     for idx in range(1, len(rows) - 1):
         prev_p, cur_p, next_p = rows[idx - 1].date_parts, rows[idx].date_parts, rows[idx + 1].date_parts
         if prev_p and cur_p and next_p:
+            if cur_p[2] is not None and anchor_year is not None and abs(cur_p[2] - anchor_year) > 1:
+                continue
             m_prev, y_prev = prev_p[1], prev_p[2] or rows[idx].statement_year or active_year
             m_next, y_next = next_p[1], next_p[2] or rows[idx].statement_year or active_year
             if (m_prev, y_prev) == (m_next, y_next) and (cur_p[1], cur_p[2] or rows[idx].statement_year or active_year) != (m_prev, y_prev):
@@ -693,9 +688,9 @@ def postprocess_rows(
                 drop_flag(r, "direction_unknown")
 
     # For Testing with or without NER
-    enable_ner = os.getenv("DISABLE_NER", "0") not in ("1", "true", "True")
+    # enable_ner = os.getenv("DISABLE_NER", "0") not in ("1", "true", "True")
 
-    if kept and enable_ner:
+    if kept:
         ner_inputs = [
             "" if r.is_opening else " ".join(filter(None, (r.description, r.extra)))
             for r in kept

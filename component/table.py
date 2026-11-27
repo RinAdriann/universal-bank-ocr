@@ -311,6 +311,7 @@ def build_dominant_font_profile(spans: Sequence[Span], y_min: float = 0.0, y_max
             "subset_prefix": "",
             "size": 0.0,
             "color": 0,
+            "flags": 0,
         }
 
     font_counts = Counter(s.font for s in region_spans)
@@ -318,6 +319,7 @@ def build_dominant_font_profile(spans: Sequence[Span], y_min: float = 0.0, y_max
     subset_counts = Counter(s.subset_prefix for s in region_spans if s.subset_prefix)
     size_counts = Counter(round(s.size, 1) for s in region_spans if s.size > 0)
     color_counts = Counter(s.color for s in region_spans)
+    flags_counts = Counter(s.flags for s in region_spans)
 
     return {
         "font": font_counts.most_common(1)[0][0] if font_counts else "",
@@ -325,6 +327,7 @@ def build_dominant_font_profile(spans: Sequence[Span], y_min: float = 0.0, y_max
         "subset_prefix": subset_counts.most_common(1)[0][0] if subset_counts else "",
         "size": size_counts.most_common(1)[0][0] if size_counts else 0.0,
         "color": color_counts.most_common(1)[0][0] if color_counts else 0,
+        "flags": flags_counts.most_common(1)[0][0] if flags_counts else 0,
     }
 
 
@@ -470,6 +473,7 @@ def evaluate_signal_2_structural(
             "subset_prefix": dominant_profile.get("subset_prefix", ""),
             "size": dominant_profile.get("size", 0.0),
             "color": dominant_profile.get("color", 0),
+            "flags": dominant_profile.get("flags", 0),
         }
 
     num_tokens = [w for w in cell.words if not DIRECTION_MARKER_RE.match(w.text.strip())]
@@ -520,6 +524,7 @@ def evaluate_signal_2_structural(
         "subset_prefix": primary.subset_prefix,
         "size": primary.size,
         "color": primary.color,
+        "flags": primary.flags,
     }
 
 
@@ -585,6 +590,7 @@ def resolve_numeric_consensus(
             subset_prefix=sig2["subset_prefix"],
             size=sig2["size"],
             color=sig2["color"],
+            flags=sig2["flags"],
             contiguous=sig2["contiguous"],
             signal1_ok=sig1_ok,
             signal2_ok=sig2_ok,
